@@ -224,6 +224,6 @@ export async function startServer(options: { port: number; hostname: string }) {
 
 // Start if run directly
 if (require.main === module) {
-  const port = parseInt(process.env.PORT || "3000", 10);
+  const port = parseInt(process.env.PORT || "5000", 10);
   startServer({ port, hostname: "0.0.0.0" });
 }
