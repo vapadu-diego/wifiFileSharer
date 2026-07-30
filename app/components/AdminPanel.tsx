@@ -5,6 +5,15 @@ import { Socket } from "socket.io-client";
 import { RoomSummary } from "@/lib/types";
 import Modal from "./Modal";
 
+interface GetAllRoomsResponse {
+  success: boolean;
+  rooms: RoomSummary[];
+}
+
+interface AdminActionResponse {
+  success: boolean;
+}
+
 interface AdminPanelProps {
   socket: Socket;
   onJoinRoom: (roomId: string, ghost: boolean) => void;
@@ -16,7 +25,7 @@ export default function AdminPanel({ socket, onJoinRoom }: AdminPanelProps) {
   const [closeRoomModal, setCloseRoomModal] = useState<string | null>(null);
 
   const fetchRooms = () => {
-    socket.emit("get_all_rooms", (res: any) => {
+    socket.emit("get_all_rooms", (res: GetAllRoomsResponse) => {
       setLoading(false);
       if (res.success) {
         setRooms(res.rooms);
@@ -35,7 +44,7 @@ export default function AdminPanel({ socket, onJoinRoom }: AdminPanelProps) {
   };
 
   const handleCloseRoom = (roomId: string) => {
-    socket.emit("admin_close_room", { roomId }, (res: any) => {
+    socket.emit("admin_close_room", { roomId }, (res: AdminActionResponse) => {
       if (res.success) {
         fetchRooms();
       }

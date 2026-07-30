@@ -4,13 +4,26 @@ import { useState, useEffect } from "react";
 import { Socket } from "socket.io-client";
 import { FILE_SIZE_OPTIONS } from "@/lib/types";
 
-interface ConnectFormProps {
-  socket: Socket;
-  onRoomJoined?: (roomId: string, password?: string) => void;
+interface RoomActionResponse {
+  success: boolean;
+  error?: string;
 }
 
-export default function ConnectForm({ socket, onRoomJoined }: ConnectFormProps) {
-  const [mode, setMode] = useState<"join" | "create">("join");
+interface CreateRoomResponse {
+  success: boolean;
+  roomId?: string;
+  error?: string;
+}
+
+interface ConnectFormProps {
+  socket: Socket;
+  defaultMode?: "join" | "create";
+  onRoomJoined?: (roomId: string, password?: string) => void;
+  onCancel?: () => void;
+}
+
+export default function ConnectForm({ socket, defaultMode = "join", onRoomJoined, onCancel }: ConnectFormProps) {
+  const [mode, setMode] = useState<"join" | "create">(defaultMode);
   const [nickname, setNickname] = useState("");
   const [roomId, setRoomId] = useState("");
   const [customRoomId, setCustomRoomId] = useState("");
@@ -20,6 +33,11 @@ export default function ConnectForm({ socket, onRoomJoined }: ConnectFormProps) 
     const stored = localStorage.getItem("wifi_sharer_nickname");
     if (stored) setNickname(stored);
   }, []);
+
+  // Sync mode when defaultMode prop changes
+  useEffect(() => {
+    setMode(defaultMode);
+  }, [defaultMode]);
   const [maxFileSize, setMaxFileSize] = useState(FILE_SIZE_OPTIONS[2].value);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -44,7 +62,7 @@ export default function ConnectForm({ socket, onRoomJoined }: ConnectFormProps) 
         setLoading(false);
         return;
       }
-      socket.emit("join_room", { roomId, nickname: nickname.trim(), password }, (response: any) => {
+      socket.emit("join_room", { roomId, nickname: nickname.trim(), password }, (response: RoomActionResponse) => {
         setLoading(false);
         if (!response.success) {
           setError(response.error || "Error al unirse");
@@ -56,22 +74,35 @@ export default function ConnectForm({ socket, onRoomJoined }: ConnectFormProps) 
         }
       });
     } else {
-      socket.emit("create_room", { nickname: nickname.trim(), password, maxFileSize, customId: customRoomId.trim() }, (response: any) => {
+      socket.emit("create_room", { nickname: nickname.trim(), password, maxFileSize, customId: customRoomId.trim() }, (response: CreateRoomResponse) => {
         setLoading(false);
         if (!response.success) {
           setError(response.error || "Error al crear sala");
         } else {
           localStorage.setItem("wifi_sharer_nickname", nickname.trim());
-          localStorage.setItem("wifi_sharer_room_id", response.roomId);
+          localStorage.setItem("wifi_sharer_room_id", response.roomId ?? "");
           localStorage.setItem("wifi_sharer_room_password", password || "");
-          onRoomJoined?.(response.roomId, password || undefined);
+          onRoomJoined?.(response.roomId ?? "", password || undefined);
         }
       });
     }
   };
 
   return (
-    <div className="card card-glow animate-slideUp" style={{ maxWidth: "420px", width: "100%" }}>
+    <div className="card card-glow animate-slideUp" style={{ maxWidth: "420px", width: "100%", position: "relative" }}>
+      {onCancel && (
+        <button
+          type="button"
+          onClick={onCancel}
+          className="btn btn-icon btn-ghost"
+          style={{ position: "absolute", top: "12px", right: "12px", width: "32px", height: "32px", padding: 0 }}
+          aria-label="Cerrar"
+        >
+          <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+            <path d="M18 6L6 18M6 6l12 12" />
+          </svg>
+        </button>
+      )}
       {/* Tabs */}
       <div className="tabs mb-6" style={{ display: "flex", gap: "6px", background: "rgba(255, 255, 255, 0.05)", padding: "4px", borderRadius: "12px" }}>
         <button

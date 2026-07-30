@@ -9,6 +9,11 @@ import ParticipantsPanel from "./ParticipantsPanel";
 import FileIcon from "./FileIcon";
 import Modal from "./Modal";
 
+interface RoomActionResponse {
+  success: boolean;
+  error?: string;
+}
+
 interface RoomViewProps {
   socket: Socket;
   room: Room;
@@ -39,7 +44,7 @@ function copyToClipboard(text: string): Promise<void> {
 }
 
 export default function RoomView({ socket, room, currentUserId, isGhost = false, onRoomExited }: RoomViewProps) {
-  const [activeTab, setActiveTab] = useState<"files" | "texts">("files");
+  const [activeTab, setActiveTab] = useState<"files" | "texts">("texts");
   const [showParticipants, setShowParticipants] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [deleteModal, setDeleteModal] = useState<{ type: "file" | "text" | "exit" | "last_user_exit"; id?: string; name?: string } | null>(null);
@@ -68,7 +73,7 @@ export default function RoomView({ socket, room, currentUserId, isGhost = false,
 
   const exitRoom = (keepRoomActive: boolean = false) => {
     // Emit leave_room event to server with the keep_active option
-    socket.emit("leave_room", { roomId: room.id, keepActive: keepRoomActive }, (res: any) => {
+    socket.emit("leave_room", { roomId: room.id, keepActive: keepRoomActive }, (res: RoomActionResponse) => {
       if (res.success) {
         // Clear session from localStorage
         localStorage.removeItem("wifi_sharer_room_id");
@@ -101,14 +106,14 @@ export default function RoomView({ socket, room, currentUserId, isGhost = false,
   };
 
   const handleDeleteFile = (fileId: string) => {
-    socket.emit("delete_file", { roomId: room.id, fileId }, (res: any) => {
+    socket.emit("delete_file", { roomId: room.id, fileId }, (res: RoomActionResponse) => {
       if (!res.success) alert(res.error || "Error al eliminar archivo");
     });
     setDeleteModal(null);
   };
 
   const handleDeleteText = (textId: string) => {
-    socket.emit("delete_text", { roomId: room.id, textId }, (res: any) => {
+    socket.emit("delete_text", { roomId: room.id, textId }, (res: RoomActionResponse) => {
       if (!res.success) alert(res.error || "Error al eliminar mensaje");
     });
     setDeleteModal(null);

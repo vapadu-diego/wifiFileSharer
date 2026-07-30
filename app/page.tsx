@@ -1,25 +1,25 @@
 "use client";
 
 import { useEffect, useState, useCallback, useRef } from "react";
-import io, { Socket } from "socket.io-client";
-import { Room } from "@/lib/types";
+import Image from "next/image";
+import { OnlineUser } from "@/lib/types";
+import { useSocket } from "./hooks/useSocket";
+import { useModal } from "./hooks/useModal";
+import { useSession } from "./hooks/useSession";
+import { useContacts } from "./hooks/useContacts";
+import { useRoom } from "./hooks/useRoom";
+import { useRecentRooms, RecentRoom } from "./hooks/useRecentRooms";
 import ConnectForm from "./components/ConnectForm";
+import OnlineContactsView from "./components/OnlineContactsView";
+import PrivateChatView from "./components/PrivateChatView";
 import RoomView from "./components/RoomView";
 import AdminPanel from "./components/AdminPanel";
 import Modal from "./components/Modal";
+import ChatLayout from "./components/ChatLayout";
 
-// Types for recent rooms
-interface RecentRoom {
-  id: string;
-  password?: string;
-  joinedAt: number;
-}
-
-// Helper functions for recent rooms storage
 const RECENT_ROOMS_KEY = "wifi_sharer_recent_rooms";
-const MAX_RECENT_ROOMS = 10;
 
-function getRecentRooms(): RecentRoom[] {
+function readRecentRooms() {
   try {
     const stored = localStorage.getItem(RECENT_ROOMS_KEY);
     return stored ? JSON.parse(stored) : [];
@@ -28,272 +28,77 @@ function getRecentRooms(): RecentRoom[] {
   }
 }
 
-function addRecentRoom(roomId: string, password?: string) {
-  const recent = getRecentRooms().filter(r => r.id !== roomId);
-  recent.unshift({ id: roomId, password, joinedAt: Date.now() });
-  if (recent.length > MAX_RECENT_ROOMS) recent.pop();
-  localStorage.setItem(RECENT_ROOMS_KEY, JSON.stringify(recent));
-}
-
-function removeRecentRoom(roomId: string) {
-  const recent = getRecentRooms().filter(r => r.id !== roomId);
-  localStorage.setItem(RECENT_ROOMS_KEY, JSON.stringify(recent));
-}
-
 export default function Home() {
-  const [socket, setSocket] = useState<Socket | null>(null);
-  const [currentView, setCurrentView] = useState<"home" | "room">("home");
-  const [room, setRoom] = useState<Room | null>(null);
-  const [isAdmin, setIsAdmin] = useState(false);
-  const [isGhost, setIsGhost] = useState(false);
-  const [showAdminPanel, setShowAdminPanel] = useState(false);
-  const [recentRooms, setRecentRooms] = useState<RecentRoom[]>([]);
-  const [activeRecentRooms, setActiveRecentRooms] = useState<string[]>([]);
-  const [isReconnecting, setIsReconnecting] = useState(false);
-  const reconnectAttemptRef = useRef(0);
+  const { socket, isReconnecting } = useSocket();
+  const { modalConfig, showModal, hideModal } = useModal();
+  const { myNickname, mySocketId, registerUser } = useSession();
+  const chatPartnerRef = useRef<OnlineUser | null>(null);
+  const { onlineUsers, setOnlineUsers, chatPartner, setChatPartner, handleStartChat, isAdmin, unreadCounts } = useContacts(socket, chatPartnerRef);
+  const { room, setRoom, isGhost, currentView, setCurrentView, showAdminPanel, setShowAdminPanel, handleRoomJoined, handleRoomExited, handleAdminJoinRoom } = useRoom(socket, showModal);
+  const { displayRecentRooms, setRecentRooms, checkActiveRecentRooms, handleJoinRecentRoom } = useRecentRooms(socket, showModal);
 
-  // Notification Modal State
-  const [modalConfig, setModalConfig] = useState<{
-    isOpen: boolean;
-    title: string;
-    message: string;
-    type: "info" | "warning" | "error";
-  }>({
-    isOpen: false,
-    title: "",
-    message: "",
-    type: "info"
-  });
-
-  const showModal = useCallback((title: string, message: string, type: "info" | "warning" | "error" = "info") => {
-    setModalConfig({ isOpen: true, title, message, type });
-  }, []);
-
-  // Load recent rooms from localStorage on mount
-  useEffect(() => {
-    setRecentRooms(getRecentRooms());
-  }, [currentView]);
-
-  // Check which recent rooms are still active
-  const checkActiveRecentRooms = useCallback((socketInstance: Socket) => {
-    const recent = getRecentRooms();
-    if (recent.length === 0) {
-      setActiveRecentRooms([]);
-      return;
-    }
-
-    socketInstance.emit("check_rooms_exist", { roomIds: recent.map(r => r.id) }, (response: { activeRooms: string[] }) => {
-      if (response && response.activeRooms) {
-        setActiveRecentRooms(response.activeRooms);
-        // Remove inactive rooms from recent list
-        const stillActive = recent.filter(r => response.activeRooms.includes(r.id));
-        if (stillActive.length !== recent.length) {
-          localStorage.setItem(RECENT_ROOMS_KEY, JSON.stringify(stillActive));
-          setRecentRooms(stillActive);
-        }
-      }
-    });
-  }, []);
+  const [showRoomForm, setShowRoomForm] = useState(false);
+  const [roomFormMode, setRoomFormMode] = useState<"create" | "join">("create");
 
   useEffect(() => {
-    const socketInstance = io({
-      reconnection: true,
-      reconnectionAttempts: Infinity,
-      reconnectionDelay: 1000,
-      reconnectionDelayMax: 5000,
-      timeout: 20000,
-    });
-    setSocket(socketInstance);
+    chatPartnerRef.current = chatPartner;
+  }, [chatPartner]);
 
-    socketInstance.on("connect", () => {
-      console.log("Connected:", socketInstance.id);
-      reconnectAttemptRef.current = 0;
-      setIsReconnecting(false);
-      
-      // Check active recent rooms
-      checkActiveRecentRooms(socketInstance);
-      
-      // Try to reconnect to a previous session
-      const savedRoomId = localStorage.getItem("wifi_sharer_room_id");
+  useEffect(() => {
+    if (!socket) return;
+
+    const onConnect = () => {
       const savedNickname = localStorage.getItem("wifi_sharer_nickname");
-      const savedPassword = localStorage.getItem("wifi_sharer_room_password");
-
-      if (savedRoomId && savedNickname) {
-        console.log("Attempting to reconnect to room:", savedRoomId);
-        socketInstance.emit("reconnect_to_room", {
-          roomId: savedRoomId,
-          nickname: savedNickname,
-          password: savedPassword || ""
-        }, (response: any) => {
-          if (response.success && response.room) {
-            console.log("Successfully reconnected to room");
-            setRoom(response.room);
-            setCurrentView("room");
-          } else {
-            console.log("Failed to reconnect:", response.error);
-            // Clear session data on failed reconnection
-            localStorage.removeItem("wifi_sharer_room_id");
-            localStorage.removeItem("wifi_sharer_room_password");
-            
-            // Show error message if it's not just "room not found" (which is normal after some time)
-            if (response.error && response.error !== "Sala no encontrada") {
-              showModal("Error de Reconexión", response.error, "warning");
-            }
-          }
+      if (savedNickname) {
+        registerUser(socket, savedNickname, (users) => {
+          setOnlineUsers(users);
+          setChatPartner(null);
+          setCurrentView("contacts");
         });
       }
-    });
-
-    // Socket disconnection handling with reconnection indicator
-    socketInstance.on("disconnect", (reason) => {
-      console.log("Disconnected:", reason);
-      setIsReconnecting(true);
-      
-      // If the server disconnected us intentionally, we might want to handle it differently
-      if (reason === "io server disconnect") {
-        // The server forcefully disconnected us, try to reconnect
-        socketInstance.connect();
-      }
-      // For other reasons (transport close, ping timeout, etc.), socket.io will auto-reconnect
-    });
-
-    socketInstance.on("reconnect_attempt", (attempt) => {
-      console.log("Reconnection attempt:", attempt);
-      reconnectAttemptRef.current = attempt;
-    });
-
-    socketInstance.on("reconnect_failed", () => {
-      console.log("Reconnection failed after all attempts");
-      setIsReconnecting(false);
-      showModal("Error de Conexión", "No se pudo reconectar al servidor. Por favor, recarga la página.", "error");
-    });
-
-    socketInstance.on("admin_status", ({ isAdmin: admin }) => {
-      setIsAdmin(admin);
-    });
-
-    socketInstance.on("room_updated", (updatedRoom: Room) => {
-      setRoom(updatedRoom);
-      setCurrentView("room");
-    });
-
-    socketInstance.on("room_closed", () => {
-      const currentRoomId = localStorage.getItem("wifi_sharer_room_id");
-      if (currentRoomId) {
-        removeRecentRoom(currentRoomId);
-      }
-      setRoom(null);
-      setCurrentView("home");
-      setIsGhost(false);
-      // Clear session data
-      localStorage.removeItem("wifi_sharer_room_id");
-      localStorage.removeItem("wifi_sharer_room_password");
-      showModal("Sala Cerrada", "La sala ha sido cerrada y todos los archivos han sido eliminados.", "warning");
-    });
-
-    socketInstance.on("you_were_kicked", () => {
-      setRoom(null);
-      setCurrentView("home");
-      // Clear session data
-      localStorage.removeItem("wifi_sharer_room_id");
-      localStorage.removeItem("wifi_sharer_room_password");
-      showModal("Fuiste Expulsado", "El anfitrión te ha expulsado de la sala.", "warning");
-    });
-
-    socketInstance.on("you_were_banned", () => {
-      setRoom(null);
-      setCurrentView("home");
-      // Clear session data
-      localStorage.removeItem("wifi_sharer_room_id");
-      localStorage.removeItem("wifi_sharer_room_password");
-      showModal("Has sido Bloqueado", "Has sido bloqueado de esta sala y no podrás volver a entrar.", "error");
-    });
-
-    return () => {
-      socketInstance.disconnect();
-    };
-  }, [showModal, checkActiveRecentRooms]);
-
-  // Called when user successfully joins a room - adds to recent
-  const handleRoomJoined = useCallback((roomId: string, password?: string) => {
-    addRecentRoom(roomId, password);
-    setRecentRooms(getRecentRooms());
-  }, []);
-
-  // Called when user exits a room - update state
-  const handleRoomExited = useCallback(() => {
-    setRoom(null);
-    setCurrentView("home");
-    setIsGhost(false);
-    // Refresh recent rooms list
-    if (socket) {
       checkActiveRecentRooms(socket);
-    }
-  }, [socket, checkActiveRecentRooms]);
+    };
 
-  // Join a recent room
-  const handleJoinRecentRoom = useCallback((recentRoom: RecentRoom) => {
+    socket.on("connect", onConnect);
+    return () => { socket.off("connect", onConnect); };
+  }, [socket, registerUser, checkActiveRecentRooms, setOnlineUsers, setChatPartner, setCurrentView]);
+
+  useEffect(() => {
     if (!socket) return;
-    
-    const savedNickname = localStorage.getItem("wifi_sharer_nickname");
-    if (!savedNickname) {
-      showModal("Apodo Requerido", "Por favor, ingresa un apodo primero usando el formulario de abajo.", "warning");
-      return;
-    }
-
-    socket.emit("join_room", { 
-      roomId: recentRoom.id, 
-      nickname: savedNickname, 
-      password: recentRoom.password || "" 
-    }, (res: any) => {
-      if (res.success) {
-        localStorage.setItem("wifi_sharer_room_id", recentRoom.id);
-        localStorage.setItem("wifi_sharer_room_password", recentRoom.password || "");
-        setRoom(res.room);
-        setCurrentView("room");
-        addRecentRoom(recentRoom.id, recentRoom.password);
-      } else {
-        if (res.error === "Sala no encontrada") {
-          removeRecentRoom(recentRoom.id);
-          setRecentRooms(getRecentRooms());
-        }
-        showModal("Error", res.error || "Error al unirse a la sala.", "error");
-      }
-    });
+    const handleReconnectFailed = () => {
+      showModal("Error de Conexión", "No se pudo reconectar al servidor. Por favor, recarga la página.", "error");
+    };
+    socket.on("reconnect_failed", handleReconnectFailed);
+    return () => { socket.off("reconnect_failed", handleReconnectFailed); };
   }, [socket, showModal]);
 
-  const handleAdminJoinRoom = (roomId: string, ghost: boolean) => {
-    if (!socket) return;
-
-    if (ghost) {
-      socket.emit("join_room_ghost", { roomId }, (res: any) => {
-        if (res.success) {
-          setRoom(res.room);
-          setCurrentView("room");
-          setIsGhost(true);
-          setShowAdminPanel(false);
-        } else {
-          showModal("Error", res.error || "No se pudo entrar en modo fantasma.", "error");
-        }
-      });
-    } else {
-      const nickname = prompt("Ingresa tu apodo para esta sala:") || "Admin";
-      socket.emit("join_room", { roomId, nickname, password: "" }, (res: any) => {
-        if (res.success) {
-          setRoom(res.room);
-          setCurrentView("room");
-          setIsGhost(false);
-          setShowAdminPanel(false);
-          addRecentRoom(roomId);
-        } else {
-          showModal("Error", res.error || "Error al entrar a la sala.", "error");
-        }
-      });
-    }
+  const handleNicknameSubmit = (e: React.FormEvent<HTMLFormElement>) => {
+    e.preventDefault();
+    const formData = new FormData(e.currentTarget);
+    const nickname = (formData.get("nickname") as string || "").trim();
+    if (!nickname || !socket) return;
+    registerUser(socket, nickname, (users) => {
+      setOnlineUsers(users);
+      setChatPartner(null);
+      setCurrentView("contacts");
+    });
   };
 
-  // Get active recent rooms for display
-  const displayRecentRooms = recentRooms.filter(r => activeRecentRooms.includes(r.id));
+  const handleRoomJoinedWrap = useCallback((roomId: string, password?: string) => {
+    handleRoomJoined(roomId, password);
+    setRecentRooms(readRecentRooms());
+    setShowRoomForm(false);
+  }, [handleRoomJoined, setRecentRooms]);
+
+  const handleOpenCreateRoom = () => {
+    setRoomFormMode("create");
+    setShowRoomForm(true);
+  };
+
+  const handleOpenJoinRoom = () => {
+    setRoomFormMode("join");
+    setShowRoomForm(true);
+  };
 
   if (!socket) {
     return (
@@ -310,147 +115,125 @@ export default function Home() {
   }
 
   return (
-    <main className="min-h-screen p-4 flex flex-col items-center justify-center relative overflow-hidden">
-      {/* Reconnection Indicator */}
+    <main className={`min-h-screen flex flex-col relative overflow-hidden ${currentView === "contacts" ? "" : "p-4 items-center justify-center"}`}>
       {isReconnecting && (
-        <div
-          style={{
-            position: "fixed",
-            top: 0,
-            left: 0,
-            right: 0,
-            background: "rgba(245, 158, 11, 0.15)",
-            borderBottom: "1px solid var(--warning)",
-            padding: "12px 16px",
-            zIndex: 100,
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            gap: "12px",
-          }}
-        >
+        <div style={{
+          position: "fixed", top: 0, left: 0, right: 0,
+          background: "rgba(245, 158, 11, 0.15)",
+          borderBottom: "1px solid var(--warning)",
+          padding: "12px 16px", zIndex: 100,
+          display: "flex", alignItems: "center", justifyContent: "center", gap: "12px",
+        }}>
           <svg className="animate-pulse" width="20" height="20" fill="none" stroke="var(--warning)" strokeWidth="2" viewBox="0 0 24 24">
             <circle cx="12" cy="12" r="10" opacity="0.3" />
             <path d="M12 2a10 10 0 0 1 10 10" />
           </svg>
-          <span style={{ color: "var(--warning)", fontWeight: 500 }}>
-            Reconectando al servidor...
-          </span>
+          <span style={{ color: "var(--warning)", fontWeight: 500 }}>Reconectando al servidor...</span>
         </div>
       )}
 
-      {/* Background Effects */}
       <div style={{
-        position: "fixed",
-        top: 0,
-        left: 0,
-        right: 0,
-        bottom: 0,
+        position: "fixed", top: 0, left: 0, right: 0, bottom: 0,
         background: "radial-gradient(ellipse at 50% 0%, rgba(0, 240, 255, 0.08) 0%, transparent 50%)",
-        pointerEvents: "none",
-        zIndex: 0
+        pointerEvents: "none", zIndex: 0
       }} />
       <div style={{
-        position: "fixed",
-        top: 0,
-        left: 0,
-        right: 0,
-        bottom: 0,
+        position: "fixed", top: 0, left: 0, right: 0, bottom: 0,
         background: "radial-gradient(ellipse at 80% 80%, rgba(168, 85, 247, 0.05) 0%, transparent 50%)",
-        pointerEvents: "none",
-        zIndex: 0
+        pointerEvents: "none", zIndex: 0
       }} />
 
-      {currentView === "home" ? (
+      {currentView === "name" && (
         <div className="flex flex-col gap-6 items-center w-full max-w-lg animate-slideUp relative" style={{ zIndex: 1 }}>
           <div className="text-center">
             <div className="flex flex-col items-center justify-center gap-3 mb-4">
-              <img src="/icon.png" alt="Wifi File Sharer Logo" width="80" height="80" className="animate-glow rounded-2xl" />
+              <Image src="/icon.png" alt="Wifi File Sharer" width={80} height={80} className="animate-glow rounded-2xl" />
               <h1 className="text-gradient" style={{ fontSize: "clamp(1.75rem, 7vw, 3rem)", fontWeight: 700, letterSpacing: "-1px", lineHeight: 1.1 }}>
                 Wifi File Sharer
               </h1>
-              <a
-                href="https://github.com/isaiasfer"
-                target="_blank"
-                rel="noopener noreferrer"
+              <a href="https://github.com/isaiasfer" target="_blank" rel="noopener noreferrer"
                 className="text-muted hover:text-primary transition-colors"
-                style={{ fontSize: "0.85rem", textDecoration: "none", opacity: 0.8 }}
-              >
+                style={{ fontSize: "0.85rem", textDecoration: "none", opacity: 0.8 }}>
                 Creado por Isaias Fernandez
               </a>
             </div>
             <p className="text-muted" style={{ marginTop: "0.5rem", fontSize: "0.9rem" }}>
-              Comparte archivos en tu red local
+              Comparte archivos y chatea en tu red local
             </p>
           </div>
 
-          {isAdmin && (
-            <button
-              className="btn btn-ghost btn-sm"
-              onClick={() => setShowAdminPanel(!showAdminPanel)}
-              style={{
-                borderColor: showAdminPanel ? "var(--primary)" : "var(--card-border)",
-                display: "flex",
-                alignItems: "center",
-                gap: "8px"
-              }}
-            >
-              🛡️ <span>Panel Admin</span>
-            </button>
-          )}
+          <div className="card card-glow animate-slideUp" style={{ maxWidth: "400px", width: "100%" }}>
+            <form onSubmit={handleNicknameSubmit} className="flex flex-col gap-4">
+              <div>
+                <label className="text-muted" style={{ fontSize: "0.85rem", marginBottom: "6px", display: "block" }}>
+                  Tu Apodo
+                </label>
+                <input
+                  className="input" name="nickname" placeholder="Ej: Carlos"
+                  maxLength={15} autoComplete="off" autoFocus
+                  defaultValue={localStorage.getItem("wifi_sharer_nickname") || ""}
+                />
+              </div>
+              <button type="submit" className="btn btn-primary w-full">
+                <span className="flex items-center gap-2" style={{ justifyContent: "center" }}>
+                  <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+                    <path d="M12 5v14M5 12h14" />
+                  </svg>
+                  <span style={{ lineHeight: 1 }}>Conectarse</span>
+                </span>
+              </button>
+            </form>
+          </div>
 
-          {showAdminPanel && isAdmin ? (
-            <AdminPanel socket={socket} onJoinRoom={handleAdminJoinRoom} />
-          ) : (
-            <>
-              <ConnectForm socket={socket} onRoomJoined={handleRoomJoined} />
-              
-              {/* Recent Rooms Section */}
+          <footer className="text-muted text-center" style={{ fontSize: "0.75rem" }}>
+            <p>Asegúrate de estar en el mismo WiFi</p>
+          </footer>
+        </div>
+      )}
+
+      {currentView === "contacts" && (
+        <ChatLayout
+          showMain={!!chatPartner || (showAdminPanel && isAdmin)}
+          sidebar={
+            <OnlineContactsView
+              myNickname={myNickname}
+              onlineUsers={onlineUsers}
+              unreadCounts={unreadCounts}
+              onStartChat={handleStartChat}
+              onCreateRoom={handleOpenCreateRoom}
+              onJoinRoom={handleOpenJoinRoom}
+              isAdmin={isAdmin}
+              showAdminPanel={showAdminPanel}
+              onToggleAdminPanel={() => setShowAdminPanel(!showAdminPanel)}
+            >
               {displayRecentRooms.length > 0 && (
-                <div className="w-full animate-fadeIn">
-                  <div style={{ 
-                    display: "flex", 
-                    alignItems: "center", 
-                    gap: "8px", 
-                    marginBottom: "12px",
-                    paddingLeft: "4px"
-                  }}>
+                <div style={{ padding: "0.75rem 1rem" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: "8px", marginBottom: "12px" }}>
                     <svg width="16" height="16" fill="none" stroke="var(--muted)" strokeWidth="2" viewBox="0 0 24 24">
                       <circle cx="12" cy="12" r="10" />
                       <polyline points="12 6 12 12 16 14" />
                     </svg>
-                    <span className="text-muted" style={{ fontSize: "0.85rem", fontWeight: 600 }}>
-                      Salas Recientes
-                    </span>
+                    <span className="text-muted" style={{ fontSize: "0.85rem", fontWeight: 600 }}>Salas Recientes</span>
                   </div>
                   <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-                    {displayRecentRooms.map((recentRoom) => (
+                    {displayRecentRooms.map((recentRoom: RecentRoom) => (
                       <button
                         key={recentRoom.id}
-                        onClick={() => handleJoinRecentRoom(recentRoom)}
+                        onClick={() => handleJoinRecentRoom(recentRoom, (room) => {
+                          setRoom(room);
+                          setCurrentView("room");
+                        })}
                         className="recent-room-btn"
                         style={{
-                          display: "flex",
-                          alignItems: "center",
-                          justifyContent: "space-between",
-                          width: "100%",
-                          padding: "12px 16px",
-                          background: "rgba(255, 255, 255, 0.03)",
-                          border: "1px solid var(--card-border)",
-                          borderRadius: "var(--radius)",
-                          cursor: "pointer",
-                          transition: "all 0.2s ease",
+                          display: "flex", alignItems: "center", justifyContent: "space-between",
+                          width: "100%", padding: "12px 16px",
+                          background: "rgba(220, 217, 217, 0.03)",
+                          border: "1px solid var(--card-border)", borderRadius: "var(--radius)",
+                          cursor: "pointer", transition: "all 0.2s ease",
                         }}
                       >
                         <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
-                          <span 
-                            className="text-gradient" 
-                            style={{ 
-                              fontWeight: 700, 
-                              letterSpacing: "2px", 
-                              fontSize: "1rem" 
-                            }}
-                          >
+                          <span className="text-gradient" style={{ fontWeight: 700, letterSpacing: "2px", fontSize: "1rem" }}>
                             {recentRoom.id}
                           </span>
                           {recentRoom.password && (
@@ -464,9 +247,7 @@ export default function Home() {
                           )}
                         </div>
                         <div style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-                          <span className="badge badge-success" style={{ fontSize: "0.65rem" }}>
-                            Activa
-                          </span>
+                          <span className="badge badge-success" style={{ fontSize: "0.65rem" }}>Activa</span>
                           <svg width="16" height="16" fill="none" stroke="var(--primary)" strokeWidth="2" viewBox="0 0 24 24">
                             <path d="M9 18l6-6-6-6" />
                           </svg>
@@ -476,22 +257,66 @@ export default function Home() {
                   </div>
                 </div>
               )}
-            </>
-          )}
-
-          <footer className="text-muted text-center" style={{ fontSize: "0.75rem" }}>
-            <p>Asegúrate de estar en el mismo WiFi</p>
-            {isAdmin && <p className="text-primary" style={{ marginTop: "4px" }}>🛡️ Modo Administrador Activo</p>}
-          </footer>
-        </div>
-      ) : (
-        room && <RoomView socket={socket} room={room} currentUserId={socket.id || ""} isGhost={isGhost} onRoomExited={handleRoomExited} />
+            </OnlineContactsView>
+          }
+          main={
+            showAdminPanel && isAdmin ? (
+              <AdminPanel socket={socket} onJoinRoom={handleAdminJoinRoom} />
+            ) : chatPartner ? (
+              <PrivateChatView
+                socket={socket}
+                partner={chatPartner}
+                currentUserId={mySocketId || socket.id || ""}
+                currentUserName={myNickname}
+                onBack={() => setChatPartner(null)}
+              />
+            ) : (
+              <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", gap: "1rem" }} className="text-muted">
+                <svg width="64" height="64" fill="none" stroke="currentColor" strokeWidth="1" viewBox="0 0 24 24" style={{ opacity: 0.3 }}>
+                  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
+                </svg>
+                <span style={{ fontSize: "1rem" }}>Selecciona un contacto para chatear</span>
+                <span style={{ fontSize: "0.8rem", opacity: 0.7 }}>o crea una sala para compartir archivos</span>
+              </div>
+            )
+          }
+        />
       )}
 
-      {/* Global Notification Modal */}
+      {currentView === "room" && room && (
+        <RoomView
+          socket={socket}
+          room={room}
+          currentUserId={mySocketId || socket.id || ""}
+          isGhost={isGhost}
+          onRoomExited={handleRoomExited}
+        />
+      )}
+
+      {showRoomForm && (
+        <div
+          style={{
+            position: "fixed", inset: 0,
+            background: "rgba(0,0,0,0.7)", backdropFilter: "blur(4px)",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            zIndex: 200, padding: "1rem",
+          }}
+          onClick={() => setShowRoomForm(false)}
+        >
+          <div onClick={(e) => e.stopPropagation()} style={{ width: "100%", maxWidth: "420px" }}>
+            <ConnectForm
+              socket={socket}
+              defaultMode={roomFormMode}
+              onRoomJoined={handleRoomJoinedWrap}
+              onCancel={() => setShowRoomForm(false)}
+            />
+          </div>
+        </div>
+      )}
+
       <Modal
         isOpen={modalConfig.isOpen}
-        onClose={() => setModalConfig({ ...modalConfig, isOpen: false })}
+        onClose={hideModal}
         title={modalConfig.title}
         message={modalConfig.message}
         type={modalConfig.type}

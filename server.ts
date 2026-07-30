@@ -9,7 +9,8 @@ import fs from "fs";
 import path from "path";
 import { setupSocket } from "./lib/socket";
 import { addFileToRoom, getRoom } from "./lib/rooms";
-import { SharedFile } from "./lib/types";
+import { addPrivateFile, getPrivateFileById } from "./lib/presence";
+import { SharedFile, PrivateFile } from "./lib/types";
 
 const isDist = __dirname.endsWith("dist");
 const dev = process.env.NODE_ENV === "development" || (!isDist && process.env.NODE_ENV !== "production");
@@ -111,6 +112,82 @@ export async function startServer(options: { port: number; hostname: string }) {
 
       res.json({ success: true, file: sharedFile });
     });
+  });
+
+  // Private Upload Endpoint
+  server.post("/api/upload-private", (req: Request, res: Response) => {
+    const form = formidable({
+      uploadDir: uploadDir,
+      keepExtensions: true,
+      maxFileSize: 500 * 1024 * 1024,
+    });
+
+    form.parse(req, (err, fields, files) => {
+      if (err) {
+        res.status(500).json({ error: "Upload failed" });
+        return;
+      }
+
+      const toId = Array.isArray(fields.toId) ? fields.toId[0] : fields.toId;
+      const fromId = Array.isArray(fields.fromId) ? fields.fromId[0] : fields.fromId;
+      const fromName = Array.isArray(fields.fromName) ? fields.fromName[0] : fields.fromName;
+      const uploadedFile = Array.isArray(files.file) ? files.file[0] : files.file;
+
+      if (!toId || !fromId || !uploadedFile) {
+        res.status(400).json({ error: "Missing fields" });
+        return;
+      }
+
+      const privateFile: PrivateFile = {
+        id: uploadedFile.newFilename,
+        name: uploadedFile.originalFilename || "unknown",
+        size: uploadedFile.size,
+        type: uploadedFile.mimetype || "application/octet-stream",
+        fromId,
+        toId,
+        fromName: fromName || "Anonymous",
+        path: uploadedFile.filepath,
+        createdAt: Date.now(),
+      };
+
+      addPrivateFile(privateFile);
+
+      // Notify the recipient via socket
+      const _io = (global as any).io;
+      if (_io) {
+        _io.to(toId).emit("private_file", privateFile);
+      }
+
+      res.json({ success: true, file: privateFile });
+    });
+  });
+
+  // Private Download Endpoint
+  server.get("/api/download-private/:fileId", (req: Request, res: Response) => {
+    const { fileId } = req.params;
+    const file = getPrivateFileById(fileId);
+    if (!file || !fs.existsSync(file.path)) {
+      res.status(404).send("File not found or expired");
+      return;
+    }
+    res.download(file.path, file.name);
+  });
+
+  // Private Preview Endpoint
+  server.get("/api/preview-private/:fileId", (req: Request, res: Response) => {
+    const { fileId } = req.params;
+    const file = getPrivateFileById(fileId);
+    if (!file || !fs.existsSync(file.path)) {
+      res.status(404).send("File not found");
+      return;
+    }
+    if (!file.type.startsWith("image/")) {
+      res.status(400).send("Not an image");
+      return;
+    }
+    res.setHeader("Content-Type", file.type);
+    res.setHeader("Cache-Control", "public, max-age=3600");
+    fs.createReadStream(file.path).pipe(res);
   });
 
   // Download Endpoint

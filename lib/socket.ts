@@ -1,5 +1,6 @@
 import { Server, Socket } from "socket.io";
 import { createRoom, joinRoom, joinRoomAsGhost, leaveRoom, addTextToRoom, getRoom, getAllRooms, kickUser, banUserIp, deleteRoom, removeFileFromRoom, removeTextFromRoom, updateUserSocketId, checkRoomsExist } from "./rooms";
+import { addUser, removeUser, getAllUsers, addPrivateMessage, getConversation, getPrivateFiles } from "./presence";
 import { User, SharedText, RoomSettings } from "./types";
 
 function parseUserAgent(ua: string): { os: string; browser: string } {
@@ -35,6 +36,44 @@ export const setupSocket = (io: Server) => {
 
     // Tell client if they are admin
     socket.emit("admin_status", { isAdmin });
+
+    // Register presence with a nickname
+    socket.on("register_user", ({ nickname }, callback) => {
+      const user = addUser(socket.id, nickname, os, browser);
+      const onlineUsers = getAllUsers();
+      // Notify others
+      socket.broadcast.emit("user_online", user);
+      callback({ success: true, user, onlineUsers });
+    });
+
+    // Get all online users
+    socket.on("get_online_users", (callback) => {
+      callback({ onlineUsers: getAllUsers() });
+    });
+
+    // Send a private message to another user
+    socket.on("send_private_message", ({ toId, content }, callback) => {
+      const fromUser = getAllUsers().find((u) => u.id === socket.id);
+      if (!fromUser) {
+        callback({ success: false, error: "Usuario no registrado" });
+        return;
+      }
+      const msg = addPrivateMessage(socket.id, toId, fromUser.nickname, content);
+      io.to(toId).emit("private_message", msg);
+      callback({ success: true, message: msg });
+    });
+
+    // Get conversation history with a specific user
+    socket.on("get_private_messages", ({ withUserId }, callback) => {
+      const messages = getConversation(socket.id, withUserId);
+      callback({ messages });
+    });
+
+    // Get private files shared in a conversation
+    socket.on("get_private_files", ({ withUserId }, callback) => {
+      const files = getPrivateFiles(socket.id, withUserId);
+      callback({ files });
+    });
 
     socket.on("create_room", ({ nickname, password, maxFileSize, customId }, callback) => {
       const settings: Partial<RoomSettings> = {};
@@ -325,6 +364,12 @@ export const setupSocket = (io: Server) => {
     });
 
     socket.on("disconnecting", () => {
+      // Remove from online presence
+      const user = removeUser(socket.id);
+      if (user) {
+        socket.broadcast.emit("user_offline", { id: socket.id });
+      }
+
       for (const roomId of socket.rooms) {
         if (roomId !== socket.id) {
           const room = leaveRoom(roomId, socket.id);

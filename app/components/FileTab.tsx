@@ -44,8 +44,8 @@ export default function FileTab({ roomId, senderId, senderName, maxFileSize }: F
         const data = await res.json();
         throw new Error(data.error || "Upload failed");
       }
-    } catch (err: any) {
-      setError(err.message || "Error al subir archivo");
+    } catch (err: unknown) {
+      setError(err instanceof Error ? err.message : "Error al subir archivo");
     } finally {
       setUploading(false);
     }
