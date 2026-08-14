@@ -43,6 +43,10 @@ html, body {
 ::-webkit-scrollbar-thumb:hover { background: var(--primary); }
 
 /* ============ ANIMATIONS ============ */
+@keyframes badgePulse {
+  0%, 100% { box-shadow: 0 0 4px var(--accent-glow); }
+  50% { box-shadow: 0 0 14px var(--accent-glow), 0 0 24px var(--accent-glow); }
+}
 @keyframes fadeIn {
   from { opacity: 0; }
   to { opacity: 1; }
@@ -285,6 +289,26 @@ html, body {
   border: 1px solid rgba(34, 197, 94, 0.3);
 }
 
+.badge-unread {
+  position: absolute;
+  bottom: -2px;
+  right: -2px;
+  min-width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #fff;
+  font-size: 0.6rem;
+  font-weight: 700;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: 2px solid var(--background-secondary);
+  animation: badgePulse 1.5s infinite;
+  line-height: 1;
+  padding: 0 4px;
+}
+
 /* ============ TABS ============ */
 .tabs {
   display: flex;
@@ -414,13 +438,13 @@ html, body {
   align-items: center;
   gap: 12px;
   padding: 12px;
-  background: rgba(255, 255, 255, 0.02);
   border-radius: var(--radius);
   transition: all 0.2s ease;
 }
 
 .user-card:hover {
-  background: rgba(255, 255, 255, 0.05);
+  background: rgba(0, 240, 255, 0.06) !important;
+  border-color: rgba(0, 240, 255, 0.25) !important;
 }
 
 .user-avatar {
@@ -561,5 +585,57 @@ html, body {
   background: rgba(255, 255, 255, 0.08) !important;
   border-color: var(--primary) !important;
   transform: translateX(4px);
+}
+
+/* ============ CHAT LAYOUT ============ */
+.chat-layout {
+  display: flex;
+  width: 100%;
+  height: 100vh;
+  overflow: hidden;
+  background: var(--background);
+}
+
+.chat-sidebar {
+  width: 280px;
+  display: flex;
+  flex-direction: column;
+  background: var(--background-secondary);
+  border-right: 1px solid var(--card-border);
+  flex-shrink: 0;
+  height: 100%;
+  overflow: hidden;
+}
+
+.chat-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  height: 100%;
+  overflow: hidden;
+  position: relative;
+}
+
+@media (max-width: 768px) {
+  .chat-sidebar {
+    width: 100%;
+  }
+
+  .chat-sidebar-hidden-mobile {
+    display: none !important;
+  }
+
+  .chat-main {
+    width: 100%;
+  }
+
+  .chat-main-hidden-mobile {
+    display: none !important;
+  }
+
+  .chat-main-visible-mobile {
+    display: flex !important;
+  }
 }
 

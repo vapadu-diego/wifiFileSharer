@@ -56,6 +56,35 @@ export interface RoomSummary {
   createdAt: number;
 }
 
+export interface OnlineUser {
+  id: string;
+  nickname: string;
+  os: string;
+  browser: string;
+  joinedAt: number;
+}
+
+export interface PrivateMessage {
+  id: string;
+  fromId: string;
+  toId: string;
+  fromName: string;
+  content: string;
+  createdAt: number;
+}
+
+export interface PrivateFile {
+  id: string;
+  name: string;
+  size: number;
+  type: string;
+  fromId: string;
+  toId: string;
+  fromName: string;
+  path: string;
+  createdAt: number;
+}
+
 export const DEFAULT_ROOM_SETTINGS: RoomSettings = {
   maxFileSize: 100 * 1024 * 1024,
 };
