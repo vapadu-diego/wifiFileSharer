@@ -9,7 +9,7 @@ import fs from "fs";
 import path from "path";
 import { setupSocket } from "./lib/socket";
 import { addFileToRoom, getRoom } from "./lib/rooms";
-import { addPrivateFile, getPrivateFileById } from "./lib/presence";
+import { addPrivateFile, getPrivateFileById, getSocketId } from "./lib/presence";
 import { SharedFile, PrivateFile } from "./lib/types";
 
 const isDist = __dirname.endsWith("dist");
@@ -154,8 +154,11 @@ export async function startServer(options: { port: number; hostname: string }) {
 
       // Notify the recipient via socket
       const _io = (global as any).io;
-      if (_io) {
-        _io.to(toId).emit("private_file", privateFile);
+      if (_io && toId) {
+        const targetSocketId = getSocketId(toId);
+        if (targetSocketId) {
+          _io.to(targetSocketId).emit("private_file", privateFile);
+        }
       }
 
       res.json({ success: true, file: privateFile });

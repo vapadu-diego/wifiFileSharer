@@ -31,7 +31,7 @@ function readRecentRooms() {
 export default function Home() {
   const { socket, isReconnecting } = useSocket();
   const { modalConfig, showModal, hideModal } = useModal();
-  const { myNickname, mySocketId, registerUser } = useSession();
+  const { myNickname, myPersistentId, registerUser } = useSession();
   const chatPartnerRef = useRef<OnlineUser | null>(null);
   const { onlineUsers, setOnlineUsers, chatPartner, setChatPartner, handleStartChat, isAdmin, unreadCounts } = useContacts(socket, chatPartnerRef);
   const { room, setRoom, isGhost, currentView, setCurrentView, showAdminPanel, setShowAdminPanel, handleRoomJoined, handleRoomExited, handleAdminJoinRoom } = useRoom(socket, showModal);
@@ -266,7 +266,7 @@ export default function Home() {
               <PrivateChatView
                 socket={socket}
                 partner={chatPartner}
-                currentUserId={mySocketId || socket.id || ""}
+                currentUserId={myPersistentId || socket.id || ""}
                 currentUserName={myNickname}
                 onBack={() => setChatPartner(null)}
               />
@@ -287,7 +287,7 @@ export default function Home() {
         <RoomView
           socket={socket}
           room={room}
-          currentUserId={mySocketId || socket.id || ""}
+          currentUserId={myPersistentId || socket.id || ""}
           isGhost={isGhost}
           onRoomExited={handleRoomExited}
         />

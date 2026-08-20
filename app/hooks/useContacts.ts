@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef, MutableRefObject } from "react";
+import { useState, useEffect, useCallback, MutableRefObject } from "react";
 import { Socket } from "socket.io-client";
 import { OnlineUser, PrivateMessage, PrivateFile } from "@/lib/types";
 
@@ -18,18 +18,46 @@ export function useContacts(socket: Socket | null, chatPartnerRef: MutableRefObj
 
     const handleUserOnline = (user: OnlineUser) => {
       setOnlineUsers((prev) => {
-        if (prev.find((u) => u.id === user.id)) return prev;
+        // Deduplicate by persistentId
+        if (prev.find((u) => u.persistentId === user.persistentId)) return prev;
         return [...prev, user];
       });
     };
 
-    const handleUserOffline = ({ id }: { id: string }) => {
-      setOnlineUsers((prev) => prev.filter((u) => u.id !== id));
-      setChatPartner((prev) => (prev && prev.id === id ? null : prev));
+    const handleUserOffline = ({ persistentId }: { persistentId: string }) => {
+      setOnlineUsers((prev) => prev.filter((u) => u.persistentId !== persistentId));
+      // DON'T close the chat — just mark the partner as offline
+      setChatPartner((prev) => {
+        if (prev && prev.persistentId === persistentId) {
+          return { ...prev, isOnline: false };
+        }
+        return prev;
+      });
+    };
+
+    const handleUserReconnected = (user: OnlineUser) => {
+      // Update user in the online list (new socketId)
+      setOnlineUsers((prev) => {
+        const idx = prev.findIndex((u) => u.persistentId === user.persistentId);
+        if (idx >= 0) {
+          const updated = [...prev];
+          updated[idx] = user;
+          return updated;
+        }
+        return [...prev, user];
+      });
+      // If this is the current chat partner, mark them as online again
+      setChatPartner((prev) => {
+        if (prev && prev.persistentId === user.persistentId) {
+          return { ...user, isOnline: true };
+        }
+        return prev;
+      });
     };
 
     const handlePrivateMessage = (msg: PrivateMessage) => {
-      if (chatPartnerRef.current?.id !== msg.fromId) {
+      // msg.fromId is now a persistentId
+      if (chatPartnerRef.current?.persistentId !== msg.fromId) {
         setUnreadCounts((prev) => ({
           ...prev,
           [msg.fromId]: (prev[msg.fromId] || 0) + 1,
@@ -38,7 +66,8 @@ export function useContacts(socket: Socket | null, chatPartnerRef: MutableRefObj
     };
 
     const handlePrivateFile = (f: PrivateFile) => {
-      if (chatPartnerRef.current?.id !== f.fromId) {
+      // f.fromId is now a persistentId
+      if (chatPartnerRef.current?.persistentId !== f.fromId) {
         setUnreadCounts((prev) => ({
           ...prev,
           [f.fromId]: (prev[f.fromId] || 0) + 1,
@@ -49,6 +78,7 @@ export function useContacts(socket: Socket | null, chatPartnerRef: MutableRefObj
     socket.on("admin_status", handleAdminStatus);
     socket.on("user_online", handleUserOnline);
     socket.on("user_offline", handleUserOffline);
+    socket.on("user_reconnected", handleUserReconnected);
     socket.on("private_message", handlePrivateMessage);
     socket.on("private_file", handlePrivateFile);
 
@@ -56,6 +86,7 @@ export function useContacts(socket: Socket | null, chatPartnerRef: MutableRefObj
       socket.off("admin_status", handleAdminStatus);
       socket.off("user_online", handleUserOnline);
       socket.off("user_offline", handleUserOffline);
+      socket.off("user_reconnected", handleUserReconnected);
       socket.off("private_message", handlePrivateMessage);
       socket.off("private_file", handlePrivateFile);
     };
@@ -63,9 +94,10 @@ export function useContacts(socket: Socket | null, chatPartnerRef: MutableRefObj
 
   const handleStartChat = useCallback((user: OnlineUser) => {
     setChatPartner(user);
+    // Clear unread using persistentId
     setUnreadCounts((prev) => {
       const next = { ...prev };
-      delete next[user.id];
+      delete next[user.persistentId];
       return next;
     });
   }, []);

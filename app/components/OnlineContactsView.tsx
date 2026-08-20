@@ -138,7 +138,7 @@ export default function OnlineContactsView({
           <div className="flex flex-col gap-1">
             {filtered.map((user) => (
                   <button
-                key={user.id}
+                key={user.persistentId}
                 onClick={() => onStartChat(user)}
                 className="user-card"
                 style={{
@@ -156,9 +156,9 @@ export default function OnlineContactsView({
                   <div className="user-avatar" style={{ width: "40px", height: "40px" }}>
                     {getInitials(user.nickname)}
                   </div>
-                  {unreadCounts[user.id] > 0 && (
+                  {unreadCounts[user.persistentId] > 0 && (
                     <span className="badge-unread">
-                      {unreadCounts[user.id] > 99 ? "99+" : unreadCounts[user.id]}
+                      {unreadCounts[user.persistentId] > 99 ? "99+" : unreadCounts[user.persistentId]}
                     </span>
                   )}
                 </div>

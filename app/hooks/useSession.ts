@@ -4,6 +4,17 @@ import { useState, useCallback } from "react";
 import { Socket } from "socket.io-client";
 import { OnlineUser } from "@/lib/types";
 
+const PERSISTENT_ID_KEY = "wifi_sharer_persistent_id";
+
+function getOrCreatePersistentId(): string {
+  let id = localStorage.getItem(PERSISTENT_ID_KEY);
+  if (!id) {
+    id = crypto.randomUUID();
+    localStorage.setItem(PERSISTENT_ID_KEY, id);
+  }
+  return id;
+}
+
 interface RegisterUserResponse {
   success: boolean;
   user: OnlineUser;
@@ -12,23 +23,24 @@ interface RegisterUserResponse {
 
 export function useSession() {
   const [myNickname, setMyNickname] = useState("");
-  const [mySocketId, setMySocketId] = useState("");
+  const [myPersistentId, setMyPersistentId] = useState("");
 
   const registerUser = useCallback(
     (
       socketInstance: Socket,
       nickname: string,
-      onSuccess?: (onlineUsers: OnlineUser[], socketId: string) => void
+      onSuccess?: (onlineUsers: OnlineUser[], persistentId: string) => void
     ) => {
+      const persistentId = getOrCreatePersistentId();
       socketInstance.emit(
         "register_user",
-        { nickname },
+        { nickname, persistentId },
         (res: RegisterUserResponse) => {
           if (res.success) {
             setMyNickname(nickname);
-            setMySocketId(socketInstance.id || "");
+            setMyPersistentId(persistentId);
             localStorage.setItem("wifi_sharer_nickname", nickname);
-            onSuccess?.(res.onlineUsers || [], socketInstance.id || "");
+            onSuccess?.(res.onlineUsers || [], persistentId);
           }
         }
       );
@@ -36,5 +48,5 @@ export function useSession() {
     []
   );
 
-  return { myNickname, mySocketId, registerUser, setMyNickname, setMySocketId };
+  return { myNickname, myPersistentId, registerUser, setMyNickname, setMyPersistentId };
 }
