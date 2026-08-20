@@ -9,12 +9,22 @@ import {
   getFileCategory,
 } from "@/lib/types";
 import FileIcon from "./FileIcon";
+import FormattedMessage from "./FormattedMessage";
+import {
+  getLocalMessages,
+  saveLocalMessages,
+  addLocalMessage,
+  getLocalFiles,
+  saveLocalFiles,
+  addLocalFile
+} from "@/lib/chatPersistence";
 
 interface PrivateChatViewProps {
   socket: Socket;
   partner: OnlineUser;
   currentUserId: string;
   currentUserName: string;
+  myUserId: string;
   onBack: () => void;
 }
 
@@ -56,6 +66,7 @@ export default function PrivateChatView({
   partner,
   currentUserId,
   currentUserName,
+  myUserId,
   onBack,
 }: PrivateChatViewProps) {
   const [messages, setMessages] = useState<PrivateMessage[]>([]);
@@ -68,23 +79,112 @@ export default function PrivateChatView({
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Load history
+  // Autofocus input when chat opens or changes
   useEffect(() => {
-    socket.emit(
-      "get_private_messages",
-      { withUserId: partner.id },
-      (res: MessagesResponse) => {
-        if (res.messages) setMessages(res.messages);
+    inputRef.current?.focus();
+  }, [partner.id]);
+
+  // Close chat on ESC key
+  useEffect(() => {
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        onBack();
       }
-    );
-    socket.emit(
-      "get_private_files",
-      { withUserId: partner.id },
-      (res: FilesResponse) => {
-        if (res.files) setFiles(res.files);
+    };
+    window.addEventListener("keydown", handleGlobalKeyDown);
+    return () => window.removeEventListener("keydown", handleGlobalKeyDown);
+  }, [onBack]);
+
+  // Load local history & start P2P sync
+  useEffect(() => {
+    const localMsgs = getLocalMessages(myUserId, partner.userId);
+    const localFls = getLocalFiles(myUserId, partner.userId);
+    setMessages(localMsgs);
+    setFiles(localFls);
+
+    const lastMsg = localMsgs[localMsgs.length - 1];
+    const lastTimestamp = lastMsg ? lastMsg.createdAt : 0;
+    socket.emit("private_sync_ping", {
+      toSocketId: partner.id,
+      fromUserId: myUserId,
+      lastTimestamp
+    });
+  }, [socket, partner.id, partner.userId, myUserId]);
+
+  // Listen for P2P sync requests and data
+  useEffect(() => {
+    const syncPingHandler = (msg: { fromSocketId: string; fromUserId: string; lastTimestamp: number }) => {
+      if (msg.fromUserId !== partner.userId) return;
+
+      const localMsgs = getLocalMessages(myUserId, partner.userId);
+      const localFls = getLocalFiles(myUserId, partner.userId);
+      
+      const lastMsg = localMsgs[localMsgs.length - 1];
+      const t_mine = lastMsg ? lastMsg.createdAt : 0;
+
+      if (t_mine > msg.lastTimestamp) {
+        const newMsgs = localMsgs.filter(m => m.createdAt > msg.lastTimestamp);
+        const newFls = localFls.filter(f => f.createdAt > msg.lastTimestamp);
+        socket.emit("private_sync_data", {
+          toSocketId: msg.fromSocketId,
+          fromUserId: myUserId,
+          messages: newMsgs,
+          files: newFls
+        });
+      } else if (t_mine < msg.lastTimestamp) {
+        socket.emit("private_sync_ping", {
+          toSocketId: msg.fromSocketId,
+          fromUserId: myUserId,
+          lastTimestamp: t_mine
+        });
       }
-    );
-  }, [socket, partner.id]);
+    };
+
+    const syncDataHandler = (data: { fromUserId: string; messages: PrivateMessage[]; files: PrivateFile[] }) => {
+      if (data.fromUserId !== partner.userId) return;
+
+      let updatedMsgs = [...getLocalMessages(myUserId, partner.userId)];
+      let updatedFls = [...getLocalFiles(myUserId, partner.userId)];
+
+      let changed = false;
+      if (data.messages && data.messages.length > 0) {
+        data.messages.forEach(msg => {
+          if (!updatedMsgs.some(m => m.id === msg.id)) {
+            updatedMsgs.push(msg);
+            changed = true;
+          }
+        });
+        if (changed) {
+          updatedMsgs.sort((a, b) => a.createdAt - b.createdAt);
+          saveLocalMessages(myUserId, partner.userId, updatedMsgs);
+          setMessages(updatedMsgs);
+        }
+      }
+
+      if (data.files && data.files.length > 0) {
+        let filesChanged = false;
+        data.files.forEach(file => {
+          if (!updatedFls.some(f => f.id === file.id)) {
+            updatedFls.push(file);
+            filesChanged = true;
+          }
+        });
+        if (filesChanged) {
+          updatedFls.sort((a, b) => a.createdAt - b.createdAt);
+          saveLocalFiles(myUserId, partner.userId, updatedFls);
+          setFiles(updatedFls);
+        }
+      }
+    };
+
+    socket.on("private_sync_ping", syncPingHandler);
+    socket.on("private_sync_data", syncDataHandler);
+
+    return () => {
+      socket.off("private_sync_ping", syncPingHandler);
+      socket.off("private_sync_data", syncDataHandler);
+    };
+  }, [socket, partner.userId, myUserId]);
 
   // Listen for new messages
   useEffect(() => {
@@ -93,7 +193,8 @@ export default function PrivateChatView({
         (msg.fromId === partner.id && msg.toId === currentUserId) ||
         (msg.fromId === currentUserId && msg.toId === partner.id)
       ) {
-        setMessages((prev) => [...prev, msg]);
+        const updated = addLocalMessage(myUserId, partner.userId, msg);
+        setMessages(updated);
       }
     };
     const fileHandler = (f: PrivateFile) => {
@@ -101,7 +202,8 @@ export default function PrivateChatView({
         (f.fromId === partner.id && f.toId === currentUserId) ||
         (f.fromId === currentUserId && f.toId === partner.id)
       ) {
-        setFiles((prev) => [...prev, f]);
+        const updated = addLocalFile(myUserId, partner.userId, f);
+        setFiles(updated);
       }
     };
     socket.on("private_message", msgHandler);
@@ -110,7 +212,7 @@ export default function PrivateChatView({
       socket.off("private_message", msgHandler);
       socket.off("private_file", fileHandler);
     };
-  }, [socket, partner.id, currentUserId]);
+  }, [socket, partner.id, partner.userId, myUserId, currentUserId]);
 
   // Merge and sort entries
   const entries: ChatEntry[] = [
@@ -140,9 +242,10 @@ export default function PrivateChatView({
       { toId: partner.id, content: text.trim() },
       (res: SendMessageResponse) => {
         if (res.success && res.message) {
-          setMessages((prev) => [...prev, res.message!]);
+          const updated = addLocalMessage(myUserId, partner.userId, res.message);
+          setMessages(updated);
         }
-      }
+      },
     );
     setText("");
     inputRef.current?.focus();
@@ -168,9 +271,14 @@ export default function PrivateChatView({
         const data = await res.json();
         throw new Error(data.error || "Upload failed");
       }
+      const data = await res.json();
+      if (data.success && data.file) {
+        const updated = addLocalFile(myUserId, partner.userId, data.file);
+        setFiles(updated);
+      }
     } catch (err: unknown) {
       setUploadError(
-        err instanceof Error ? err.message : "Error al subir archivo"
+        err instanceof Error ? err.message : "Error al subir archivo",
       );
     } finally {
       setUploading(false);
@@ -222,7 +330,8 @@ export default function PrivateChatView({
         display: "flex",
         flexDirection: "column",
         position: "relative",
-      }}>
+      }}
+    >
       {/* Header */}
       <div
         style={{
@@ -232,19 +341,22 @@ export default function PrivateChatView({
           alignItems: "center",
           gap: "10px",
           background: "var(--background-secondary)",
-        }}>
+        }}
+      >
         <button
           className="btn btn-ghost btn-icon"
           onClick={onBack}
           title="Volver"
-          style={{ width: "34px", height: "34px", padding: 0, flexShrink: 0 }}>
+          style={{ width: "34px", height: "34px", padding: 0, flexShrink: 0 }}
+        >
           <svg
             width="18"
             height="18"
             fill="none"
             stroke="currentColor"
             strokeWidth="2"
-            viewBox="0 0 24 24">
+            viewBox="0 0 24 24"
+          >
             <path d="M19 12H5M12 19l-7-7 7-7" />
           </svg>
         </button>
@@ -255,18 +367,18 @@ export default function PrivateChatView({
             height: "36px",
             fontSize: "0.85rem",
             flexShrink: 0,
-          }}>
+          }}
+        >
           {getInitials(partner.nickname)}
         </div>
         <div style={{ minWidth: 0 }}>
           <div
             style={{ fontWeight: 600, fontSize: "0.95rem" }}
-            className="truncate">
+            className="truncate"
+          >
             {partner.nickname}
           </div>
-          <div
-            className="text-muted"
-            style={{ fontSize: "0.7rem" }}>
+          <div className="text-muted" style={{ fontSize: "0.7rem" }}>
             {partner.os} · {partner.browser}
           </div>
         </div>
@@ -285,7 +397,8 @@ export default function PrivateChatView({
         onDragEnter={handleDrag}
         onDragLeave={handleDrag}
         onDragOver={handleDrag}
-        onDrop={handleDrop}>
+        onDrop={handleDrop}
+      >
         {entries.length === 0 ? (
           <div
             className="text-muted"
@@ -294,7 +407,8 @@ export default function PrivateChatView({
               textAlign: "center",
               marginTop: "auto",
               marginBottom: "auto",
-            }}>
+            }}
+          >
             Inicia una conversación con {partner.nickname}
           </div>
         ) : (
@@ -317,23 +431,24 @@ export default function PrivateChatView({
                     border: isMine
                       ? "1px solid rgba(168, 85, 247, 0.3)"
                       : "1px solid var(--card-border)",
-                  }}>
+                  }}
+                >
                   <div
                     style={{
-                      whiteSpace: "pre-wrap",
-                      wordBreak: "break-word",
                       fontSize: "0.9rem",
                       lineHeight: 1.5,
-                    }}>
-                    {msg.content}
+                    }}
+                  >
+                    <FormattedMessage content={msg.content} />
                   </div>
                   <div
                     className="text-muted"
                     style={{
                       fontSize: "0.65rem",
-                      marginTop: "4px",
+                      marginBottom: -5,
                       textAlign: isMine ? "right" : "left",
-                    }}>
+                    }}
+                  >
                     {formatTime(msg.createdAt)}
                   </div>
                 </div>
@@ -348,7 +463,8 @@ export default function PrivateChatView({
                   style={{
                     alignSelf: isMine ? "flex-end" : "flex-start",
                     maxWidth: "85%",
-                  }}>
+                  }}
+                >
                   {/* Image preview */}
                   {isImage(file.type) ? (
                     <div
@@ -360,7 +476,8 @@ export default function PrivateChatView({
                         borderColor: isMine
                           ? "rgba(168, 85, 247, 0.3)"
                           : undefined,
-                      }}>
+                      }}
+                    >
                       {/* eslint-disable-next-line @next/next/no-img-element */}
                       <img
                         src={`/api/preview-private/${file.id}`}
@@ -375,7 +492,7 @@ export default function PrivateChatView({
                         onClick={() =>
                           window.open(
                             `/api/download-private/${file.id}`,
-                            "_blank"
+                            "_blank",
                           )
                         }
                       />
@@ -386,10 +503,12 @@ export default function PrivateChatView({
                           alignItems: "center",
                           justifyContent: "space-between",
                           gap: "8px",
-                        }}>
+                        }}
+                      >
                         <div
                           className="truncate"
-                          style={{ fontSize: "0.75rem", fontWeight: 600 }}>
+                          style={{ fontSize: "0.75rem", fontWeight: 600 }}
+                        >
                           {file.fromName}
                         </div>
                         <a
@@ -400,14 +519,16 @@ export default function PrivateChatView({
                             padding: "4px 8px",
                             fontSize: "0.7rem",
                             flexShrink: 0,
-                          }}>
+                          }}
+                        >
                           <svg
                             width="12"
                             height="12"
                             fill="none"
                             stroke="currentColor"
                             strokeWidth="2"
-                            viewBox="0 0 24 24">
+                            viewBox="0 0 24 24"
+                          >
                             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" />
                           </svg>
                           Descargar
@@ -429,20 +550,20 @@ export default function PrivateChatView({
                         display: "flex",
                         alignItems: "center",
                         gap: "10px",
-                      }}>
-                      <FileIcon
-                        mimeType={file.type}
-                        size={28}
-                      />
+                      }}
+                    >
+                      <FileIcon mimeType={file.type} size={28} />
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div
                           className="truncate"
-                          style={{ fontWeight: 600, fontSize: "0.85rem" }}>
+                          style={{ fontWeight: 600, fontSize: "0.85rem" }}
+                        >
                           {file.name}
                         </div>
                         <div
                           className="text-muted"
-                          style={{ fontSize: "0.7rem" }}>
+                          style={{ fontSize: "0.7rem" }}
+                        >
                           {formatSize(file.size)} · {file.fromName}
                         </div>
                       </div>
@@ -451,14 +572,16 @@ export default function PrivateChatView({
                         target="_blank"
                         className="btn btn-ghost btn-sm"
                         style={{ padding: "6px 10px", flexShrink: 0 }}
-                        title="Descargar">
+                        title="Descargar"
+                      >
                         <svg
                           width="14"
                           height="14"
                           fill="none"
                           stroke="currentColor"
                           strokeWidth="2"
-                          viewBox="0 0 24 24">
+                          viewBox="0 0 24 24"
+                        >
                           <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" />
                         </svg>
                       </a>
@@ -470,7 +593,8 @@ export default function PrivateChatView({
                       fontSize: "0.65rem",
                       marginTop: "4px",
                       textAlign: isMine ? "right" : "left",
-                    }}>
+                    }}
+                  >
                     {formatTime(file.createdAt)}
                   </div>
                 </div>
@@ -490,7 +614,8 @@ export default function PrivateChatView({
             borderTop: "1px solid var(--accent)",
             color: "var(--accent)",
             fontSize: "0.8rem",
-          }}>
+          }}
+        >
           {uploadError}
         </div>
       )}
@@ -510,7 +635,8 @@ export default function PrivateChatView({
             zIndex: 10,
             backdropFilter: "blur(4px)",
             pointerEvents: "none",
-          }}>
+          }}
+        >
           <div className="flex flex-col items-center gap-3">
             <svg
               width="48"
@@ -518,12 +644,11 @@ export default function PrivateChatView({
               fill="none"
               stroke="var(--primary)"
               strokeWidth="1.5"
-              viewBox="0 0 24 24">
+              viewBox="0 0 24 24"
+            >
               <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M17 8l-5-5-5 5M12 3v12" />
             </svg>
-            <span
-              className="text-primary"
-              style={{ fontWeight: 600 }}>
+            <span className="text-primary" style={{ fontWeight: 600 }}>
               Suelta el archivo aquí
             </span>
           </div>
@@ -539,7 +664,8 @@ export default function PrivateChatView({
           borderTop: "1px solid var(--card-border)",
           background: "rgba(0,0,0,0.2)",
           position: "relative",
-        }}>
+        }}
+      >
         <input
           ref={fileInputRef}
           type="file"
@@ -553,7 +679,8 @@ export default function PrivateChatView({
           onClick={() => fileInputRef.current?.click()}
           disabled={uploading}
           title="Adjuntar archivo"
-          style={{ width: "40px", height: "40px", padding: 0, flexShrink: 0 }}>
+          style={{ width: "40px", height: "40px", padding: 0, flexShrink: 0 }}
+        >
           {uploading ? (
             <svg
               className="animate-pulse"
@@ -562,13 +689,9 @@ export default function PrivateChatView({
               fill="none"
               stroke="var(--primary)"
               strokeWidth="2"
-              viewBox="0 0 24 24">
-              <circle
-                cx="12"
-                cy="12"
-                r="10"
-                opacity="0.3"
-              />
+              viewBox="0 0 24 24"
+            >
+              <circle cx="12" cy="12" r="10" opacity="0.3" />
               <path d="M12 2a10 10 0 0 1 10 10" />
             </svg>
           ) : (
@@ -578,7 +701,8 @@ export default function PrivateChatView({
               fill="none"
               stroke="currentColor"
               strokeWidth="2"
-              viewBox="0 0 24 24">
+              viewBox="0 0 24 24"
+            >
               <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
             </svg>
           )}
@@ -611,14 +735,16 @@ export default function PrivateChatView({
             height: "40px",
             padding: "0 16px",
           }}
-          disabled={!text.trim()}>
+          disabled={!text.trim()}
+        >
           <svg
             width="18"
             height="18"
             fill="none"
             stroke="currentColor"
             strokeWidth="2"
-            viewBox="0 0 24 24">
+            viewBox="0 0 24 24"
+          >
             <path d="M22 2L11 13M22 2l-7 20-4-9-9-4 20-7z" />
           </svg>
         </button>

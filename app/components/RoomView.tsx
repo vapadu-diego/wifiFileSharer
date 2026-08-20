@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { Socket } from "socket.io-client";
 import { Room } from "@/lib/types";
 import FileTab from "./FileTab";
@@ -8,6 +8,7 @@ import TextTab from "./TextTab";
 import ParticipantsPanel from "./ParticipantsPanel";
 import FileIcon from "./FileIcon";
 import Modal from "./Modal";
+import FormattedMessage from "./FormattedMessage";
 
 interface RoomActionResponse {
   success: boolean;
@@ -62,14 +63,28 @@ export default function RoomView({ socket, room, currentUserId, isGhost = false,
 
   const isLastUser = room.users.length === 1;
 
-  const confirmExit = () => {
+  const confirmExit = useCallback(() => {
     if (isLastUser) {
-      // Show special dialog for last user
       setDeleteModal({ type: "last_user_exit" });
     } else {
       setDeleteModal({ type: "exit" });
     }
-  };
+  }, [isLastUser]);
+
+  // Handle ESC key to exit room or close modals
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        if (deleteModal) {
+          setDeleteModal(null);
+        } else {
+          confirmExit();
+        }
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [deleteModal, confirmExit]);
 
   const exitRoom = (keepRoomActive: boolean = false) => {
     // Emit leave_room event to server with the keep_active option
@@ -353,7 +368,7 @@ export default function RoomView({ socket, room, currentUserId, isGhost = false,
                         </button>
                       </div>
                     </div>
-                    <div style={{ whiteSpace: "pre-wrap", wordBreak: "break-word", fontSize: "0.95rem", lineHeight: 1.5 }}>{item.content}</div>
+                    <div style={{ fontSize: "0.95rem", lineHeight: 1.5 }}><FormattedMessage content={item.content} /></div>
                   </div>
                 ))}
                 {room.texts.length === 0 && (

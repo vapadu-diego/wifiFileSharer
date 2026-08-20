@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, FormEvent } from "react";
+import { useState, useRef, useEffect, FormEvent } from "react";
 import { Socket } from "socket.io-client";
 
 interface TextTabProps {
@@ -12,6 +12,11 @@ interface TextTabProps {
 export default function TextTab({ socket, roomId, senderName }: TextTabProps) {
   const [text, setText] = useState("");
   const inputRef = useRef<HTMLTextAreaElement>(null);
+
+  // Autofocus input when chat tab is opened
+  useEffect(() => {
+    inputRef.current?.focus();
+  }, []);
 
   const sendMessage = () => {
     if (!text.trim()) return;

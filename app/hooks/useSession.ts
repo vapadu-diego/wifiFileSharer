@@ -13,6 +13,17 @@ interface RegisterUserResponse {
 export function useSession() {
   const [myNickname, setMyNickname] = useState("");
   const [mySocketId, setMySocketId] = useState("");
+  const [myUserId] = useState(() => {
+    if (typeof window !== "undefined") {
+      let id = localStorage.getItem("wifi_sharer_user_id");
+      if (!id) {
+        id = Math.random().toString(36).substring(2, 11);
+        localStorage.setItem("wifi_sharer_user_id", id);
+      }
+      return id;
+    }
+    return "";
+  });
 
   const registerUser = useCallback(
     (
@@ -22,7 +33,7 @@ export function useSession() {
     ) => {
       socketInstance.emit(
         "register_user",
-        { nickname },
+        { nickname, userId: myUserId },
         (res: RegisterUserResponse) => {
           if (res.success) {
             setMyNickname(nickname);
@@ -33,8 +44,8 @@ export function useSession() {
         }
       );
     },
-    []
+    [myUserId]
   );
 
-  return { myNickname, mySocketId, registerUser, setMyNickname, setMySocketId };
+  return { myNickname, mySocketId, myUserId, registerUser, setMyNickname, setMySocketId };
 }

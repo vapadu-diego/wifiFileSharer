@@ -38,8 +38,8 @@ export const setupSocket = (io: Server) => {
     socket.emit("admin_status", { isAdmin });
 
     // Register presence with a nickname
-    socket.on("register_user", ({ nickname }, callback) => {
-      const user = addUser(socket.id, nickname, os, browser);
+    socket.on("register_user", ({ nickname, userId }, callback) => {
+      const user = addUser(socket.id, nickname, os, browser, userId);
       const onlineUsers = getAllUsers();
       // Notify others
       socket.broadcast.emit("user_online", user);
@@ -73,6 +73,15 @@ export const setupSocket = (io: Server) => {
     socket.on("get_private_files", ({ withUserId }, callback) => {
       const files = getPrivateFiles(socket.id, withUserId);
       callback({ files });
+    });
+
+    // P2P Synchronization events for chat history persistence (Option 3)
+    socket.on("private_sync_ping", ({ toSocketId, fromUserId, lastTimestamp }) => {
+      io.to(toSocketId).emit("private_sync_ping", { fromSocketId: socket.id, fromUserId, lastTimestamp });
+    });
+
+    socket.on("private_sync_data", ({ toSocketId, fromUserId, messages, files }) => {
+      io.to(toSocketId).emit("private_sync_data", { fromUserId, messages, files });
     });
 
     socket.on("create_room", ({ nickname, password, maxFileSize, customId }, callback) => {

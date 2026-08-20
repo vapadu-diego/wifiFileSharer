@@ -9,6 +9,7 @@ import { useSession } from "./hooks/useSession";
 import { useContacts } from "./hooks/useContacts";
 import { useRoom } from "./hooks/useRoom";
 import { useRecentRooms, RecentRoom } from "./hooks/useRecentRooms";
+import { requestNotificationPermission } from "@/lib/notifications";
 import ConnectForm from "./components/ConnectForm";
 import OnlineContactsView from "./components/OnlineContactsView";
 import PrivateChatView from "./components/PrivateChatView";
@@ -31,18 +32,46 @@ function readRecentRooms() {
 export default function Home() {
   const { socket, isReconnecting } = useSocket();
   const { modalConfig, showModal, hideModal } = useModal();
-  const { myNickname, mySocketId, registerUser } = useSession();
+  const { myNickname, mySocketId, myUserId, registerUser } = useSession();
   const chatPartnerRef = useRef<OnlineUser | null>(null);
-  const { onlineUsers, setOnlineUsers, chatPartner, setChatPartner, handleStartChat, isAdmin, unreadCounts } = useContacts(socket, chatPartnerRef);
-  const { room, setRoom, isGhost, currentView, setCurrentView, showAdminPanel, setShowAdminPanel, handleRoomJoined, handleRoomExited, handleAdminJoinRoom } = useRoom(socket, showModal);
-  const { displayRecentRooms, setRecentRooms, checkActiveRecentRooms, handleJoinRecentRoom } = useRecentRooms(socket, showModal);
-
   const [showRoomForm, setShowRoomForm] = useState(false);
   const [roomFormMode, setRoomFormMode] = useState<"create" | "join">("create");
+  const [unreadBrowserCount, setUnreadBrowserCount] = useState(0);
+
+  const handleNewIncomingMessage = useCallback(() => {
+    if (document.hidden || !document.hasFocus()) {
+      setUnreadBrowserCount((prev) => prev + 1);
+    }
+  }, []);
+
+  const { onlineUsers, setOnlineUsers, chatPartner, setChatPartner, handleStartChat, isAdmin, unreadCounts } = useContacts(socket, chatPartnerRef, myUserId, handleNewIncomingMessage);
+  const { room, setRoom, isGhost, currentView, setCurrentView, showAdminPanel, setShowAdminPanel, handleRoomJoined, handleRoomExited, handleAdminJoinRoom } = useRoom(socket, showModal, handleNewIncomingMessage);
+  const { displayRecentRooms, setRecentRooms, checkActiveRecentRooms, handleJoinRecentRoom } = useRecentRooms(socket, showModal);
+
+  useEffect(() => {
+    const handleFocus = () => {
+      setUnreadBrowserCount(0);
+    };
+    window.addEventListener("focus", handleFocus);
+    return () => window.removeEventListener("focus", handleFocus);
+  }, []);
+
+  useEffect(() => {
+    if (unreadBrowserCount > 0) {
+      document.title = `(${unreadBrowserCount}) Wifi File Sharer`;
+    } else {
+      document.title = "Wifi File Sharer";
+    }
+  }, [unreadBrowserCount]);
 
   useEffect(() => {
     chatPartnerRef.current = chatPartner;
   }, [chatPartner]);
+
+  // Request notification permission on mount
+  useEffect(() => {
+    requestNotificationPermission();
+  }, []);
 
   useEffect(() => {
     if (!socket) return;
@@ -77,6 +106,7 @@ export default function Home() {
     const formData = new FormData(e.currentTarget);
     const nickname = (formData.get("nickname") as string || "").trim();
     if (!nickname || !socket) return;
+    requestNotificationPermission();
     registerUser(socket, nickname, (users) => {
       setOnlineUsers(users);
       setChatPartner(null);
@@ -268,6 +298,7 @@ export default function Home() {
                 partner={chatPartner}
                 currentUserId={mySocketId || socket.id || ""}
                 currentUserName={myNickname}
+                myUserId={myUserId}
                 onBack={() => setChatPartner(null)}
               />
             ) : (

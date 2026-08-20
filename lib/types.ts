@@ -58,6 +58,7 @@ export interface RoomSummary {
 
 export interface OnlineUser {
   id: string;
+  userId: string;
   nickname: string;
   os: string;
   browser: string;

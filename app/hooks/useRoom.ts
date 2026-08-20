@@ -2,7 +2,8 @@
 
 import { useState, useEffect, useCallback } from "react";
 import { Socket } from "socket.io-client";
-import { Room } from "@/lib/types";
+import { Room, SharedText, SharedFile } from "@/lib/types";
+import { showBrowserNotification } from "@/lib/notifications";
 
 interface JoinRoomResponse {
   success: boolean;
@@ -13,7 +14,8 @@ interface JoinRoomResponse {
 
 export function useRoom(
   socket: Socket | null,
-  showModal: (title: string, message: string, type: "info" | "warning" | "error") => void
+  showModal: (title: string, message: string, type: "info" | "warning" | "error") => void,
+  onNewMessage?: () => void
 ) {
   const [room, setRoom] = useState<Room | null>(null);
   const [isGhost, setIsGhost] = useState(false);
@@ -57,16 +59,42 @@ export function useRoom(
       showModal("Has sido Bloqueado", "Has sido bloqueado de esta sala y no podrás volver a entrar.", "error");
     };
 
+    // Notifications for room messages
+    const handleNewText = (text: SharedText) => {
+      if (text.senderId !== socket.id) {
+        showBrowserNotification(
+          `💬 ${text.senderName} (Sala)`,
+          text.content.length > 100 ? text.content.slice(0, 100) + "…" : text.content
+        );
+        onNewMessage?.();
+      }
+    };
+
+    // Notifications for room file uploads
+    const handleFileUploaded = (file: SharedFile) => {
+      if (file.senderId !== socket.id) {
+        showBrowserNotification(
+          `📎 ${file.senderName} (Sala)`,
+          `Subió un archivo: ${file.name}`
+        );
+        onNewMessage?.();
+      }
+    };
+
     socket.on("room_updated", handleRoomUpdated);
     socket.on("room_closed", handleRoomClosed);
     socket.on("you_were_kicked", handleKicked);
     socket.on("you_were_banned", handleBanned);
+    socket.on("new_text", handleNewText);
+    socket.on("file_uploaded", handleFileUploaded);
 
     return () => {
       socket.off("room_updated", handleRoomUpdated);
       socket.off("room_closed", handleRoomClosed);
       socket.off("you_were_kicked", handleKicked);
       socket.off("you_were_banned", handleBanned);
+      socket.off("new_text", handleNewText);
+      socket.off("file_uploaded", handleFileUploaded);
     };
   }, [socket, showModal]);
 

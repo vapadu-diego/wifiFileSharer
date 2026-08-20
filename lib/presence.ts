@@ -7,8 +7,8 @@ function conversationKey(a: string, b: string): string {
   return [a, b].sort().join(":");
 }
 
-export const addUser = (id: string, nickname: string, os: string, browser: string): OnlineUser => {
-  const user: OnlineUser = { id, nickname, os, browser, joinedAt: Date.now() };
+export const addUser = (id: string, nickname: string, os: string, browser: string, userId?: string): OnlineUser => {
+  const user: OnlineUser = { id, userId: userId || id, nickname, os, browser, joinedAt: Date.now() };
   onlineUsers.set(id, user);
   return user;
 };
