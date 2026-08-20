@@ -12,6 +12,11 @@ import { addFileToRoom, getRoom } from "./lib/rooms";
 import { addPrivateFile, getPrivateFileById, getSocketId } from "./lib/presence";
 import { SharedFile, PrivateFile } from "./lib/types";
 
+declare global {
+  // eslint-disable-next-line no-var
+  var io: Server | undefined;
+}
+
 const isDist = __dirname.endsWith("dist");
 const dev = process.env.NODE_ENV === "development" || (!isDist && process.env.NODE_ENV !== "production");
 
@@ -33,7 +38,7 @@ export async function startServer(options: { port: number; hostname: string }) {
 
   // Setup Socket.io events
   setupSocket(io);
-  (global as any).io = io;
+  global.io = io;
 
   // Create temporary upload directory if it doesn't exist and clean it
   const uploadDir = path.join(process.cwd(), "wifi-sharer-uploads");
@@ -153,7 +158,7 @@ export async function startServer(options: { port: number; hostname: string }) {
       addPrivateFile(privateFile);
 
       // Notify the recipient via socket
-      const _io = (global as any).io;
+      const _io = global.io;
       if (_io && toId) {
         const targetSocketId = getSocketId(toId);
         if (targetSocketId) {
@@ -243,7 +248,7 @@ export async function startServer(options: { port: number; hostname: string }) {
   // Next.js Handler
   server.all(/(.*)/, (req: Request, res: Response) => {
     const parsedUrl = parse(req.url!, true);
-    handle(req as any, res as any, parsedUrl);
+    handle(req, res, parsedUrl);
   });
 
   const tryListen = (currentPort: number) => {
@@ -280,18 +285,19 @@ export async function startServer(options: { port: number; hostname: string }) {
       const open = (await import("open")).default;
       try {
         await open(url);
-      } catch (e) {
+      } catch {
         // Silently fail if browser can't open
       }
     }
   });
 
-  httpServer.on("error", (err: any) => {
+  httpServer.on("error", (err: NodeJS.ErrnoException) => {
     if (err.code === "EADDRINUSE") {
-      const nextPort = (httpServer.address() as any)?.port || port + 1;
+      const addr = httpServer.address();
+      const nextPort = typeof addr === "object" && addr ? addr.port : port + 1;
       // Note: we can't get address if it failed to bind, so we just increment our tracked port
-      console.log(`⚠️  Puerto ocupado, probando con ${port + 1}...`);
-      port++;
+      console.log(`⚠️  Puerto ocupado, probando con ${nextPort}...`);
+      port = nextPort;
       tryListen(port);
     } else {
       console.error("Fallo crítico al iniciar el servidor:", err);

@@ -8,6 +8,7 @@ import {
   PrivateFile,
   getFileCategory,
 } from "@/lib/types";
+import { generateUUID } from "@/app/hooks/useSession";
 import FileIcon from "./FileIcon";
 
 interface PrivateChatViewProps {
@@ -51,6 +52,25 @@ function isImage(mime: string) {
   return mime.startsWith("image/");
 }
 
+function copyToClipboard(text: string): Promise<void> {
+  if (typeof navigator !== "undefined" && navigator.clipboard && window.isSecureContext) {
+    return navigator.clipboard.writeText(text);
+  } else {
+    const textArea = document.createElement("textarea");
+    textArea.value = text;
+    textArea.style.position = "fixed";
+    textArea.style.left = "-999999px";
+    textArea.style.top = "-999999px";
+    document.body.appendChild(textArea);
+    textArea.focus();
+    textArea.select();
+    return new Promise((resolve, reject) => {
+      document.execCommand("copy") ? resolve() : reject();
+      textArea.remove();
+    });
+  }
+}
+
 export default function PrivateChatView({
   socket,
   partner,
@@ -64,12 +84,20 @@ export default function PrivateChatView({
   const [uploading, setUploading] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const [uploadError, setUploadError] = useState("");
+  const [copiedId, setCopiedId] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const lastSyncTimeRef = useRef(0);
   const pendingQueueRef = useRef<Array<{ tempId: string; content: string; createdAt: number }>>([]);
   const [pendingIds, setPendingIds] = useState<Set<string>>(new Set());
+
+  const copyMessage = (id: string, text: string) => {
+    copyToClipboard(text).then(() => {
+      setCopiedId(id);
+      setTimeout(() => setCopiedId(null), 2000);
+    });
+  };
 
   // Load history
   useEffect(() => {
@@ -225,7 +253,7 @@ export default function PrivateChatView({
 
     if (!socket.connected) {
       // Queue for later — show as pending in the UI
-      const tempId = crypto.randomUUID();
+      const tempId = generateUUID();
       pendingQueueRef.current.push({ tempId, content, createdAt: Date.now() });
       setPendingIds(prev => new Set(prev).add(tempId));
       setMessages(prev => [...prev, {
@@ -441,12 +469,51 @@ export default function PrivateChatView({
                     style={{
                       fontSize: "0.65rem",
                       marginTop: "4px",
-                      textAlign: isMine ? "right" : "left",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: isMine ? "flex-end" : "flex-start",
+                      gap: "6px",
                     }}>
-                    {pendingIds.has(msg.id)
-                      ? <span style={{ color: "var(--warning)" }}>⏳ Pendiente</span>
-                      : formatTime(msg.createdAt)
-                    }
+                    {!isMine && <span>{formatTime(msg.createdAt)}</span>}
+                    <button
+                      type="button"
+                      onClick={() => copyMessage(msg.id, msg.content)}
+                      title={copiedId === msg.id ? "Copiado" : "Copiar mensaje"}
+                      style={{
+                        background: copiedId === msg.id ? "rgba(34, 197, 94, 0.2)" : "rgba(255,255,255,0.06)",
+                        border: "none",
+                        borderRadius: "4px",
+                        cursor: "pointer",
+                        padding: "2px 5px",
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: "3px",
+                        color: copiedId === msg.id ? "var(--success)" : "inherit",
+                        fontSize: "0.65rem",
+                        transition: "all 0.2s",
+                      }}>
+                      {copiedId === msg.id ? (
+                        <>
+                          <svg width="10" height="10" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+                            <polyline points="20 6 9 17 4 12" />
+                          </svg>
+                          <span>Copiado</span>
+                        </>
+                      ) : (
+                        <svg width="10" height="10" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                          <rect x="9" y="9" width="13" height="13" rx="2" />
+                          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                        </svg>
+                      )}
+                    </button>
+                    {isMine && (
+                      <span>
+                        {pendingIds.has(msg.id)
+                          ? <span style={{ color: "var(--warning)" }}>⏳ Pendiente</span>
+                          : formatTime(msg.createdAt)
+                        }
+                      </span>
+                    )}
                   </div>
                 </div>
               );

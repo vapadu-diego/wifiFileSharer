@@ -18,9 +18,19 @@ export function useContacts(socket: Socket | null, chatPartnerRef: MutableRefObj
 
     const handleUserOnline = (user: OnlineUser) => {
       setOnlineUsers((prev) => {
-        // Deduplicate by persistentId
-        if (prev.find((u) => u.persistentId === user.persistentId)) return prev;
+        const idx = prev.findIndex((u) => u.persistentId === user.persistentId);
+        if (idx >= 0) {
+          const updated = [...prev];
+          updated[idx] = user;
+          return updated;
+        }
         return [...prev, user];
+      });
+      setChatPartner((prev) => {
+        if (prev && prev.persistentId === user.persistentId) {
+          return { ...user, isOnline: true };
+        }
+        return prev;
       });
     };
 

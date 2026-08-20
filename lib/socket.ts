@@ -138,8 +138,9 @@ export const setupSocket = (io: Server) => {
 
         callback({ success: true, roomId: room.id });
         io.to(room.id).emit("room_updated", getRoom(room.id));
-      } catch (error: any) {
-        callback({ success: false, error: error.message || "Error al crear sala" });
+      } catch (error: unknown) {
+        const errorMsg = error instanceof Error ? error.message : "Error al crear sala";
+        callback({ success: false, error: errorMsg });
       }
     });
 
