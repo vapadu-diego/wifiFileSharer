@@ -1,6 +1,6 @@
 import { Server, Socket } from "socket.io";
 import { createRoom, joinRoom, joinRoomAsGhost, leaveRoom, addTextToRoom, getRoom, getAllRooms, kickUser, banUserIp, deleteRoom, removeFileFromRoom, removeTextFromRoom, updateUserSocketId, checkRoomsExist } from "./rooms";
-import { addUser, removeUser, getAllUsers, addPrivateMessage, getConversation, getPrivateFiles } from "./presence";
+import { addUser, removeUser, scheduleRemoveUser, cancelRemoveUser, getAllUsers, getPersistentId, getSocketId, addPrivateMessage, getConversation, getPrivateFiles } from "./presence";
 import { User, SharedText, RoomSettings } from "./types";
 
 function parseUserAgent(ua: string): { os: string; browser: string } {
@@ -38,11 +38,19 @@ export const setupSocket = (io: Server) => {
     socket.emit("admin_status", { isAdmin });
 
     // Register presence with a nickname
-    socket.on("register_user", ({ nickname }, callback) => {
-      const user = addUser(socket.id, nickname, os, browser);
+    socket.on("register_user", ({ nickname, persistentId }, callback) => {
+      const wasReconnect = cancelRemoveUser(persistentId);
+      const user = addUser(socket.id, persistentId, nickname, os, browser);
       const onlineUsers = getAllUsers();
-      // Notify others
-      socket.broadcast.emit("user_online", user);
+
+      if (wasReconnect) {
+        // Reconnection within grace period — notify others to update socketId
+        socket.broadcast.emit("user_reconnected", user);
+      } else {
+        // New user
+        socket.broadcast.emit("user_online", user);
+      }
+
       callback({ success: true, user, onlineUsers });
     });
 
@@ -53,26 +61,58 @@ export const setupSocket = (io: Server) => {
 
     // Send a private message to another user
     socket.on("send_private_message", ({ toId, content }, callback) => {
-      const fromUser = getAllUsers().find((u) => u.id === socket.id);
+      const myPersistentId = getPersistentId(socket.id);
+      if (!myPersistentId) {
+        callback({ success: false, error: "Usuario no registrado" });
+        return;
+      }
+      const fromUser = getAllUsers().find((u) => u.persistentId === myPersistentId);
       if (!fromUser) {
         callback({ success: false, error: "Usuario no registrado" });
         return;
       }
-      const msg = addPrivateMessage(socket.id, toId, fromUser.nickname, content);
-      io.to(toId).emit("private_message", msg);
+      // Store with persistentIds
+      const msg = addPrivateMessage(myPersistentId, toId, fromUser.nickname, content);
+      // Route to target's current socket
+      const targetSocketId = getSocketId(toId);
+      if (targetSocketId) {
+        io.to(targetSocketId).emit("private_message", msg);
+      }
       callback({ success: true, message: msg });
     });
 
     // Get conversation history with a specific user
     socket.on("get_private_messages", ({ withUserId }, callback) => {
-      const messages = getConversation(socket.id, withUserId);
+      const myPersistentId = getPersistentId(socket.id);
+      if (!myPersistentId) { callback({ messages: [] }); return; }
+      const messages = getConversation(myPersistentId, withUserId);
       callback({ messages });
     });
 
     // Get private files shared in a conversation
     socket.on("get_private_files", ({ withUserId }, callback) => {
-      const files = getPrivateFiles(socket.id, withUserId);
+      const myPersistentId = getPersistentId(socket.id);
+      if (!myPersistentId) { callback({ files: [] }); return; }
+      const files = getPrivateFiles(myPersistentId, withUserId);
       callback({ files });
+    });
+
+    // Incremental sync: get messages since a timestamp
+    socket.on("get_private_messages_since", ({ withUserId, since }, callback) => {
+      const myPersistentId = getPersistentId(socket.id);
+      if (!myPersistentId) { callback({ messages: [] }); return; }
+      const allMessages = getConversation(myPersistentId, withUserId);
+      const newMessages = allMessages.filter(m => m.createdAt > since);
+      callback({ messages: newMessages });
+    });
+
+    // Incremental sync: get files since a timestamp
+    socket.on("get_private_files_since", ({ withUserId, since }, callback) => {
+      const myPersistentId = getPersistentId(socket.id);
+      if (!myPersistentId) { callback({ files: [] }); return; }
+      const allFiles = getPrivateFiles(myPersistentId, withUserId);
+      const newFiles = allFiles.filter(f => f.createdAt > since);
+      callback({ files: newFiles });
     });
 
     socket.on("create_room", ({ nickname, password, maxFileSize, customId }, callback) => {
@@ -364,12 +404,13 @@ export const setupSocket = (io: Server) => {
     });
 
     socket.on("disconnecting", () => {
-      // Remove from online presence
-      const user = removeUser(socket.id);
-      if (user) {
-        socket.broadcast.emit("user_offline", { id: socket.id });
-      }
+      // Grace period: don't remove user immediately, wait 15s
+      scheduleRemoveUser(socket.id, (user) => {
+        // Only fires if user didn't reconnect within 15 seconds
+        io.emit("user_offline", { persistentId: user.persistentId });
+      });
 
+      // Rooms: leave immediately (reconnect_to_room handles re-joining)
       for (const roomId of socket.rooms) {
         if (roomId !== socket.id) {
           const room = leaveRoom(roomId, socket.id);

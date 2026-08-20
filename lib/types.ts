@@ -58,10 +58,12 @@ export interface RoomSummary {
 
 export interface OnlineUser {
   id: string;
+  persistentId: string;
   nickname: string;
   os: string;
   browser: string;
   joinedAt: number;
+  isOnline?: boolean;
 }
 
 export interface PrivateMessage {
