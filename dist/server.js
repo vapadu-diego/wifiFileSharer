@@ -48,6 +48,7 @@ const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
 const socket_1 = require("./lib/socket");
 const rooms_1 = require("./lib/rooms");
+const presence_1 = require("./lib/presence");
 const isDist = __dirname.endsWith("dist");
 const dev = process.env.NODE_ENV === "development" || (!isDist && process.env.NODE_ENV !== "production");
 async function startServer(options) {
@@ -135,6 +136,75 @@ async function startServer(options) {
             res.json({ success: true, file: sharedFile });
         });
     });
+    // Private Upload Endpoint
+    server.post("/api/upload-private", (req, res) => {
+        const form = (0, formidable_1.default)({
+            uploadDir: uploadDir,
+            keepExtensions: true,
+            maxFileSize: 500 * 1024 * 1024,
+        });
+        form.parse(req, (err, fields, files) => {
+            if (err) {
+                res.status(500).json({ error: "Upload failed" });
+                return;
+            }
+            const toId = Array.isArray(fields.toId) ? fields.toId[0] : fields.toId;
+            const fromId = Array.isArray(fields.fromId) ? fields.fromId[0] : fields.fromId;
+            const fromName = Array.isArray(fields.fromName) ? fields.fromName[0] : fields.fromName;
+            const uploadedFile = Array.isArray(files.file) ? files.file[0] : files.file;
+            if (!toId || !fromId || !uploadedFile) {
+                res.status(400).json({ error: "Missing fields" });
+                return;
+            }
+            const privateFile = {
+                id: uploadedFile.newFilename,
+                name: uploadedFile.originalFilename || "unknown",
+                size: uploadedFile.size,
+                type: uploadedFile.mimetype || "application/octet-stream",
+                fromId,
+                toId,
+                fromName: fromName || "Anonymous",
+                path: uploadedFile.filepath,
+                createdAt: Date.now(),
+            };
+            (0, presence_1.addPrivateFile)(privateFile);
+            // Notify the recipient via socket
+            const _io = global.io;
+            if (_io && toId) {
+                const targetSocketId = (0, presence_1.getSocketId)(toId);
+                if (targetSocketId) {
+                    _io.to(targetSocketId).emit("private_file", privateFile);
+                }
+            }
+            res.json({ success: true, file: privateFile });
+        });
+    });
+    // Private Download Endpoint
+    server.get("/api/download-private/:fileId", (req, res) => {
+        const { fileId } = req.params;
+        const file = (0, presence_1.getPrivateFileById)(fileId);
+        if (!file || !fs_1.default.existsSync(file.path)) {
+            res.status(404).send("File not found or expired");
+            return;
+        }
+        res.download(file.path, file.name);
+    });
+    // Private Preview Endpoint
+    server.get("/api/preview-private/:fileId", (req, res) => {
+        const { fileId } = req.params;
+        const file = (0, presence_1.getPrivateFileById)(fileId);
+        if (!file || !fs_1.default.existsSync(file.path)) {
+            res.status(404).send("File not found");
+            return;
+        }
+        if (!file.type.startsWith("image/")) {
+            res.status(400).send("Not an image");
+            return;
+        }
+        res.setHeader("Content-Type", file.type);
+        res.setHeader("Cache-Control", "public, max-age=3600");
+        fs_1.default.createReadStream(file.path).pipe(res);
+    });
     // Download Endpoint
     server.get("/api/download/:fileId", (req, res) => {
         const { fileId } = req.params;
@@ -209,17 +279,18 @@ async function startServer(options) {
             try {
                 await open(url);
             }
-            catch (e) {
+            catch {
                 // Silently fail if browser can't open
             }
         }
     });
     httpServer.on("error", (err) => {
         if (err.code === "EADDRINUSE") {
-            const nextPort = httpServer.address()?.port || port + 1;
+            const addr = httpServer.address();
+            const nextPort = typeof addr === "object" && addr ? addr.port : port + 1;
             // Note: we can't get address if it failed to bind, so we just increment our tracked port
-            console.log(`⚠️  Puerto ocupado, probando con ${port + 1}...`);
-            port++;
+            console.log(`⚠️  Puerto ocupado, probando con ${nextPort}...`);
+            port = nextPort;
             tryListen(port);
         }
         else {
@@ -231,6 +302,6 @@ async function startServer(options) {
 }
 // Start if run directly
 if (require.main === module) {
-    const port = parseInt(process.env.PORT || "3000", 10);
+    const port = parseInt(process.env.PORT || "5000", 10);
     startServer({ port, hostname: "0.0.0.0" });
 }

@@ -4,7 +4,7 @@ Object.defineProperty(exports, "__esModule", { value: true });
 const commander_1 = require("commander");
 const server_1 = require("../server");
 if (!process.env.NODE_ENV) {
-    process.env.NODE_ENV = "production";
+    Object.assign(process.env, { NODE_ENV: "production" });
 }
 const program = new commander_1.Command();
 program

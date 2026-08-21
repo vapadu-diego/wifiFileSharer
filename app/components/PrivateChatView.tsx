@@ -8,6 +8,7 @@ import {
   PrivateFile,
   getFileCategory,
 } from "@/lib/types";
+import { generateUUID } from "@/app/hooks/useSession";
 import FileIcon from "./FileIcon";
 import FormattedMessage from "./FormattedMessage";
 import {
@@ -61,6 +62,25 @@ function isImage(mime: string) {
   return mime.startsWith("image/");
 }
 
+function copyToClipboard(text: string): Promise<void> {
+  if (typeof navigator !== "undefined" && navigator.clipboard && window.isSecureContext) {
+    return navigator.clipboard.writeText(text);
+  } else {
+    const textArea = document.createElement("textarea");
+    textArea.value = text;
+    textArea.style.position = "fixed";
+    textArea.style.left = "-999999px";
+    textArea.style.top = "-999999px";
+    document.body.appendChild(textArea);
+    textArea.focus();
+    textArea.select();
+    return new Promise((resolve, reject) => {
+      document.execCommand("copy") ? resolve() : reject();
+      textArea.remove();
+    });
+  }
+}
+
 export default function PrivateChatView({
   socket,
   partner,
@@ -75,14 +95,25 @@ export default function PrivateChatView({
   const [uploading, setUploading] = useState(false);
   const [dragActive, setDragActive] = useState(false);
   const [uploadError, setUploadError] = useState("");
+  const [copiedId, setCopiedId] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const lastSyncTimeRef = useRef(0);
+  const pendingQueueRef = useRef<Array<{ tempId: string; content: string; createdAt: number }>>([]);
+  const [pendingIds, setPendingIds] = useState<Set<string>>(new Set());
+
+  const copyMessage = (id: string, text: string) => {
+    copyToClipboard(text).then(() => {
+      setCopiedId(id);
+      setTimeout(() => setCopiedId(null), 2000);
+    });
+  };
 
   // Autofocus input when chat opens or changes
   useEffect(() => {
     inputRef.current?.focus();
-  }, [partner.id]);
+  }, [partner.persistentId]);
 
   // Close chat on ESC key
   useEffect(() => {
@@ -95,29 +126,96 @@ export default function PrivateChatView({
     return () => window.removeEventListener("keydown", handleGlobalKeyDown);
   }, [onBack]);
 
-  // Load local history & start P2P sync
+  // Load local history & resync
   useEffect(() => {
-    const localMsgs = getLocalMessages(myUserId, partner.userId);
-    const localFls = getLocalFiles(myUserId, partner.userId);
+    const localMsgs = getLocalMessages(myUserId, partner.persistentId);
+    const localFls = getLocalFiles(myUserId, partner.persistentId);
     setMessages(localMsgs);
     setFiles(localFls);
 
-    const lastMsg = localMsgs[localMsgs.length - 1];
-    const lastTimestamp = lastMsg ? lastMsg.createdAt : 0;
-    socket.emit("private_sync_ping", {
-      toSocketId: partner.id,
-      fromUserId: myUserId,
-      lastTimestamp
-    });
-  }, [socket, partner.id, partner.userId, myUserId]);
+    const lastMsgTime = localMsgs.length > 0 ? localMsgs[localMsgs.length - 1].createdAt : 0;
+    const lastFileTime = localFls.length > 0 ? localFls[localFls.length - 1].createdAt : 0;
+    const since = Math.max(lastMsgTime, lastFileTime);
+    lastSyncTimeRef.current = since;
+
+    const handleReconnect = () => {
+      const currentSince = lastSyncTimeRef.current;
+      if (currentSince > 0) {
+        socket.emit("get_private_messages_since",
+          { withUserId: partner.persistentId, since: currentSince },
+          (res: MessagesResponse) => {
+            if (res.messages?.length) {
+              setMessages(prev => {
+                const existingIds = new Set(prev.map(m => m.id));
+                const newMsgs = res.messages.filter(m => !existingIds.has(m.id));
+                const updated = newMsgs.length > 0 ? [...prev, ...newMsgs] : prev;
+                saveLocalMessages(myUserId, partner.persistentId, updated);
+                return updated;
+              });
+            }
+          }
+        );
+        socket.emit("get_private_files_since",
+          { withUserId: partner.persistentId, since: currentSince },
+          (res: FilesResponse) => {
+            if (res.files?.length) {
+              setFiles(prev => {
+                const existingIds = new Set(prev.map(f => f.id));
+                const newFiles = res.files.filter(f => !existingIds.has(f.id));
+                const updated = newFiles.length > 0 ? [...prev, ...newFiles] : prev;
+                saveLocalFiles(myUserId, partner.persistentId, updated);
+                return updated;
+              });
+            }
+          }
+        );
+      } else {
+        socket.emit("get_private_messages",
+          { withUserId: partner.persistentId },
+          (res: MessagesResponse) => {
+            if (res.messages) {
+              setMessages(res.messages);
+              saveLocalMessages(myUserId, partner.persistentId, res.messages);
+            }
+          }
+        );
+        socket.emit("get_private_files",
+          { withUserId: partner.persistentId },
+          (res: FilesResponse) => {
+            if (res.files) {
+              setFiles(res.files);
+              saveLocalFiles(myUserId, partner.persistentId, res.files);
+            }
+          }
+        );
+      }
+    };
+
+    if (socket.connected) {
+      handleReconnect();
+    }
+    socket.on("connect", handleReconnect);
+
+    if (partner.isOnline !== false) {
+      socket.emit("private_sync_ping", {
+        toSocketId: partner.id,
+        fromUserId: myUserId,
+        lastTimestamp: since
+      });
+    }
+
+    return () => {
+      socket.off("connect", handleReconnect);
+    };
+  }, [socket, partner.persistentId, partner.id, partner.isOnline, myUserId]);
 
   // Listen for P2P sync requests and data
   useEffect(() => {
     const syncPingHandler = (msg: { fromSocketId: string; fromUserId: string; lastTimestamp: number }) => {
-      if (msg.fromUserId !== partner.userId) return;
+      if (msg.fromUserId !== partner.persistentId) return;
 
-      const localMsgs = getLocalMessages(myUserId, partner.userId);
-      const localFls = getLocalFiles(myUserId, partner.userId);
+      const localMsgs = getLocalMessages(myUserId, partner.persistentId);
+      const localFls = getLocalFiles(myUserId, partner.persistentId);
       
       const lastMsg = localMsgs[localMsgs.length - 1];
       const t_mine = lastMsg ? lastMsg.createdAt : 0;
@@ -141,10 +239,10 @@ export default function PrivateChatView({
     };
 
     const syncDataHandler = (data: { fromUserId: string; messages: PrivateMessage[]; files: PrivateFile[] }) => {
-      if (data.fromUserId !== partner.userId) return;
+      if (data.fromUserId !== partner.persistentId) return;
 
-      let updatedMsgs = [...getLocalMessages(myUserId, partner.userId)];
-      let updatedFls = [...getLocalFiles(myUserId, partner.userId)];
+      let updatedMsgs = [...getLocalMessages(myUserId, partner.persistentId)];
+      let updatedFls = [...getLocalFiles(myUserId, partner.persistentId)];
 
       let changed = false;
       if (data.messages && data.messages.length > 0) {
@@ -156,7 +254,7 @@ export default function PrivateChatView({
         });
         if (changed) {
           updatedMsgs.sort((a, b) => a.createdAt - b.createdAt);
-          saveLocalMessages(myUserId, partner.userId, updatedMsgs);
+          saveLocalMessages(myUserId, partner.persistentId, updatedMsgs);
           setMessages(updatedMsgs);
         }
       }
@@ -171,7 +269,7 @@ export default function PrivateChatView({
         });
         if (filesChanged) {
           updatedFls.sort((a, b) => a.createdAt - b.createdAt);
-          saveLocalFiles(myUserId, partner.userId, updatedFls);
+          saveLocalFiles(myUserId, partner.persistentId, updatedFls);
           setFiles(updatedFls);
         }
       }
@@ -184,25 +282,25 @@ export default function PrivateChatView({
       socket.off("private_sync_ping", syncPingHandler);
       socket.off("private_sync_data", syncDataHandler);
     };
-  }, [socket, partner.userId, myUserId]);
+  }, [socket, partner.persistentId, myUserId]);
 
   // Listen for new messages
   useEffect(() => {
     const msgHandler = (msg: PrivateMessage) => {
       if (
-        (msg.fromId === partner.id && msg.toId === currentUserId) ||
-        (msg.fromId === currentUserId && msg.toId === partner.id)
+        (msg.fromId === partner.persistentId && msg.toId === currentUserId) ||
+        (msg.fromId === currentUserId && msg.toId === partner.persistentId)
       ) {
-        const updated = addLocalMessage(myUserId, partner.userId, msg);
+        const updated = addLocalMessage(myUserId, partner.persistentId, msg);
         setMessages(updated);
       }
     };
     const fileHandler = (f: PrivateFile) => {
       if (
-        (f.fromId === partner.id && f.toId === currentUserId) ||
-        (f.fromId === currentUserId && f.toId === partner.id)
+        (f.fromId === partner.persistentId && f.toId === currentUserId) ||
+        (f.fromId === currentUserId && f.toId === partner.persistentId)
       ) {
-        const updated = addLocalFile(myUserId, partner.userId, f);
+        const updated = addLocalFile(myUserId, partner.persistentId, f);
         setFiles(updated);
       }
     };
@@ -212,7 +310,7 @@ export default function PrivateChatView({
       socket.off("private_message", msgHandler);
       socket.off("private_file", fileHandler);
     };
-  }, [socket, partner.id, partner.userId, myUserId, currentUserId]);
+  }, [socket, partner.persistentId, myUserId, currentUserId]);
 
   // Merge and sort entries
   const entries: ChatEntry[] = [
@@ -234,12 +332,113 @@ export default function PrivateChatView({
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [entries.length]);
 
-  // Send text message
+  // Track last sync timestamp for incremental resync
+  useEffect(() => {
+    const lastMsgTime = messages.length > 0 ? messages[messages.length - 1].createdAt : 0;
+    const lastFileTime = files.length > 0 ? files[files.length - 1].createdAt : 0;
+    lastSyncTimeRef.current = Math.max(lastMsgTime, lastFileTime);
+  }, [messages, files]);
+
+  // Resync on reconnection — fetch messages missed while disconnected
+  useEffect(() => {
+    const handleReconnect = () => {
+      const since = lastSyncTimeRef.current;
+      if (since > 0) {
+        socket.emit("get_private_messages_since",
+          { withUserId: partner.persistentId, since },
+          (res: MessagesResponse) => {
+            if (res.messages?.length) {
+              setMessages(prev => {
+                const existingIds = new Set(prev.map(m => m.id));
+                const newMsgs = res.messages.filter(m => !existingIds.has(m.id));
+                return newMsgs.length > 0 ? [...prev, ...newMsgs] : prev;
+              });
+            }
+          }
+        );
+        socket.emit("get_private_files_since",
+          { withUserId: partner.persistentId, since },
+          (res: FilesResponse) => {
+            if (res.files?.length) {
+              setFiles(prev => {
+                const existingIds = new Set(prev.map(f => f.id));
+                const newFiles = res.files.filter(f => !existingIds.has(f.id));
+                return newFiles.length > 0 ? [...prev, ...newFiles] : prev;
+              });
+            }
+          }
+        );
+      } else {
+        socket.emit("get_private_messages",
+          { withUserId: partner.persistentId },
+          (res: MessagesResponse) => { if (res.messages) setMessages(res.messages); }
+        );
+        socket.emit("get_private_files",
+          { withUserId: partner.persistentId },
+          (res: FilesResponse) => { if (res.files) setFiles(res.files); }
+        );
+      }
+    };
+    socket.on("connect", handleReconnect);
+    return () => { socket.off("connect", handleReconnect); };
+  }, [socket, partner.persistentId]);
+
+  // Flush offline queue on reconnect
+  useEffect(() => {
+    const flushQueue = () => {
+      const queue = [...pendingQueueRef.current];
+      if (queue.length === 0) return;
+      pendingQueueRef.current = [];
+
+      for (const pending of queue) {
+        socket.emit(
+          "send_private_message",
+          { toId: partner.persistentId, content: pending.content },
+          (res: SendMessageResponse) => {
+            if (res.success && res.message) {
+              setMessages(prev => prev.map(m =>
+                m.id === pending.tempId ? res.message! : m
+              ));
+              setPendingIds(prev => {
+                const next = new Set(prev);
+                next.delete(pending.tempId);
+                return next;
+              });
+            }
+          }
+        );
+      }
+    };
+    socket.on("connect", flushQueue);
+    return () => { socket.off("connect", flushQueue); };
+  }, [socket, partner.persistentId]);
+
+  // Send text message (with offline queue support)
   const sendMessage = () => {
     if (!text.trim()) return;
+    const content = text.trim();
+    setText("");
+    inputRef.current?.focus();
+
+    if (!socket.connected) {
+      // Queue for later — show as pending in the UI
+      const tempId = generateUUID();
+      pendingQueueRef.current.push({ tempId, content, createdAt: Date.now() });
+      setPendingIds(prev => new Set(prev).add(tempId));
+      setMessages(prev => [...prev, {
+        id: tempId,
+        fromId: currentUserId,
+        toId: partner.persistentId,
+        fromName: currentUserName,
+        content,
+        createdAt: Date.now(),
+      }]);
+      return;
+    }
+
     socket.emit(
       "send_private_message",
-      { toId: partner.id, content: text.trim() },
+      { toId: partner.persistentId, content },
       (res: SendMessageResponse) => {
         if (res.success && res.message) {
           const updated = addLocalMessage(myUserId, partner.userId, res.message);
@@ -247,8 +446,6 @@ export default function PrivateChatView({
         }
       },
     );
-    setText("");
-    inputRef.current?.focus();
   };
 
   // Upload file
@@ -258,7 +455,7 @@ export default function PrivateChatView({
 
     const formData = new FormData();
     formData.append("file", file);
-    formData.append("toId", partner.id);
+    formData.append("toId", partner.persistentId);
     formData.append("fromId", currentUserId);
     formData.append("fromName", currentUserName);
 
@@ -378,8 +575,17 @@ export default function PrivateChatView({
           >
             {partner.nickname}
           </div>
-          <div className="text-muted" style={{ fontSize: "0.7rem" }}>
-            {partner.os} · {partner.browser}
+          <div
+            className="text-muted"
+            style={{ fontSize: "0.7rem", display: "flex", alignItems: "center", gap: "6px" }}>
+            <span style={{
+              width: 7, height: 7, borderRadius: "50%",
+              background: partner.isOnline === false ? "var(--muted)" : "#22c55e",
+              display: "inline-block", flexShrink: 0,
+            }} />
+            <span>{partner.isOnline === false ? "Desconectado" : "En línea"}</span>
+            <span>·</span>
+            <span>{partner.os} · {partner.browser}</span>
           </div>
         </div>
       </div>
@@ -445,11 +651,52 @@ export default function PrivateChatView({
                     className="text-muted"
                     style={{
                       fontSize: "0.65rem",
-                      marginBottom: -5,
-                      textAlign: isMine ? "right" : "left",
-                    }}
-                  >
-                    {formatTime(msg.createdAt)}
+                      marginTop: "4px",
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: isMine ? "flex-end" : "flex-start",
+                      gap: "6px",
+                    }}>
+                    {!isMine && <span>{formatTime(msg.createdAt)}</span>}
+                    <button
+                      type="button"
+                      onClick={() => copyMessage(msg.id, msg.content)}
+                      title={copiedId === msg.id ? "Copiado" : "Copiar mensaje"}
+                      style={{
+                        background: copiedId === msg.id ? "rgba(34, 197, 94, 0.2)" : "rgba(255,255,255,0.06)",
+                        border: "none",
+                        borderRadius: "4px",
+                        cursor: "pointer",
+                        padding: "2px 5px",
+                        display: "inline-flex",
+                        alignItems: "center",
+                        gap: "3px",
+                        color: copiedId === msg.id ? "var(--success)" : "inherit",
+                        fontSize: "0.65rem",
+                        transition: "all 0.2s",
+                      }}>
+                      {copiedId === msg.id ? (
+                        <>
+                          <svg width="10" height="10" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+                            <polyline points="20 6 9 17 4 12" />
+                          </svg>
+                          <span>Copiado</span>
+                        </>
+                      ) : (
+                        <svg width="10" height="10" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                          <rect x="9" y="9" width="13" height="13" rx="2" />
+                          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                        </svg>
+                      )}
+                    </button>
+                    {isMine && (
+                      <span>
+                        {pendingIds.has(msg.id)
+                          ? <span style={{ color: "var(--warning)" }}>⏳ Pendiente</span>
+                          : formatTime(msg.createdAt)
+                        }
+                      </span>
+                    )}
                   </div>
                 </div>
               );

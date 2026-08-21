@@ -32,7 +32,7 @@ function readRecentRooms() {
 export default function Home() {
   const { socket, isReconnecting } = useSocket();
   const { modalConfig, showModal, hideModal } = useModal();
-  const { myNickname, mySocketId, myUserId, registerUser } = useSession();
+  const { myNickname, myPersistentId, myUserId, registerUser } = useSession();
   const chatPartnerRef = useRef<OnlineUser | null>(null);
   const [showRoomForm, setShowRoomForm] = useState(false);
   const [roomFormMode, setRoomFormMode] = useState<"create" | "join">("create");
@@ -81,16 +81,19 @@ export default function Home() {
       if (savedNickname) {
         registerUser(socket, savedNickname, (users) => {
           setOnlineUsers(users);
-          setChatPartner(null);
-          setCurrentView("contacts");
+          setCurrentView((prev) => (prev === "name" ? "contacts" : prev));
         });
       }
       checkActiveRecentRooms(socket);
     };
 
+    if (socket.connected) {
+      onConnect();
+    }
+
     socket.on("connect", onConnect);
     return () => { socket.off("connect", onConnect); };
-  }, [socket, registerUser, checkActiveRecentRooms, setOnlineUsers, setChatPartner, setCurrentView]);
+  }, [socket, registerUser, checkActiveRecentRooms, setOnlineUsers, setCurrentView]);
 
   useEffect(() => {
     if (!socket) return;
@@ -296,7 +299,7 @@ export default function Home() {
               <PrivateChatView
                 socket={socket}
                 partner={chatPartner}
-                currentUserId={mySocketId || socket.id || ""}
+                currentUserId={myPersistentId || socket.id || ""}
                 currentUserName={myNickname}
                 myUserId={myUserId}
                 onBack={() => setChatPartner(null)}
@@ -318,7 +321,7 @@ export default function Home() {
         <RoomView
           socket={socket}
           room={room}
-          currentUserId={mySocketId || socket.id || ""}
+          currentUserId={socket.id || ""}
           isGhost={isGhost}
           onRoomExited={handleRoomExited}
         />

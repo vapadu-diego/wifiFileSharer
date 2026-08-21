@@ -4,6 +4,25 @@ import { useState, useCallback } from "react";
 import { Socket } from "socket.io-client";
 import { OnlineUser } from "@/lib/types";
 
+const PERSISTENT_ID_KEY = "wifi_sharer_persistent_id";
+
+export function generateUUID(): string {
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === "x" ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
+function getOrCreatePersistentId(): string {
+  let id = localStorage.getItem(PERSISTENT_ID_KEY);
+  if (!id || id === "undefined" || id === "null" || id.length < 10) {
+    id = generateUUID();
+    localStorage.setItem(PERSISTENT_ID_KEY, id);
+  }
+  return id;
+}
+
 interface RegisterUserResponse {
   success: boolean;
   user: OnlineUser;
@@ -12,40 +31,36 @@ interface RegisterUserResponse {
 
 export function useSession() {
   const [myNickname, setMyNickname] = useState("");
-  const [mySocketId, setMySocketId] = useState("");
-  const [myUserId] = useState(() => {
+  const [myPersistentId, setMyPersistentId] = useState<string>(() => {
     if (typeof window !== "undefined") {
-      let id = localStorage.getItem("wifi_sharer_user_id");
-      if (!id) {
-        id = Math.random().toString(36).substring(2, 11);
-        localStorage.setItem("wifi_sharer_user_id", id);
-      }
-      return id;
+      return getOrCreatePersistentId();
     }
     return "";
   });
+  const myUserId = myPersistentId;
 
   const registerUser = useCallback(
     (
       socketInstance: Socket,
       nickname: string,
-      onSuccess?: (onlineUsers: OnlineUser[], socketId: string) => void
+      onSuccess?: (onlineUsers: OnlineUser[], persistentId: string) => void
     ) => {
+      const persistentId = myPersistentId || getOrCreatePersistentId();
       socketInstance.emit(
         "register_user",
-        { nickname, userId: myUserId },
+        { nickname, persistentId },
         (res: RegisterUserResponse) => {
           if (res.success) {
             setMyNickname(nickname);
-            setMySocketId(socketInstance.id || "");
+            setMyPersistentId(persistentId);
             localStorage.setItem("wifi_sharer_nickname", nickname);
-            onSuccess?.(res.onlineUsers || [], socketInstance.id || "");
+            onSuccess?.(res.onlineUsers || [], persistentId);
           }
         }
       );
     },
-    [myUserId]
+    [myPersistentId]
   );
 
-  return { myNickname, mySocketId, myUserId, registerUser, setMyNickname, setMySocketId };
+  return { myNickname, myPersistentId, myUserId, registerUser, setMyNickname, setMyPersistentId };
 }
