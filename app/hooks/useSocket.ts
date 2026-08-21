@@ -17,8 +17,9 @@ export function useSocket() {
       timeout: 20000,
     });
 
+    setSocket(socketInstance);
+
     socketInstance.on("connect", () => {
-      setSocket(socketInstance);
       reconnectAttemptRef.current = 0;
       setIsReconnecting(false);
     });

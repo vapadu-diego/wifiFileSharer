@@ -3,7 +3,7 @@ import { Command } from "commander";
 import { startServer } from "../server";
 
 if (!process.env.NODE_ENV) {
-  (process.env as any).NODE_ENV = "production";
+  Object.assign(process.env, { NODE_ENV: "production" });
 }
 
 const program = new Command();

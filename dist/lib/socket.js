@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.setupSocket = void 0;
 const rooms_1 = require("./rooms");
+const presence_1 = require("./presence");
 function parseUserAgent(ua) {
     let os = "Unknown";
     let browser = "Unknown";
@@ -39,6 +40,88 @@ const setupSocket = (io) => {
         const isAdmin = isLocalhost(clientIp);
         // Tell client if they are admin
         socket.emit("admin_status", { isAdmin });
+        // Register presence with a nickname
+        socket.on("register_user", ({ nickname, persistentId }, callback) => {
+            const wasReconnect = (0, presence_1.cancelRemoveUser)(persistentId);
+            const user = (0, presence_1.addUser)(socket.id, persistentId, nickname, os, browser);
+            const onlineUsers = (0, presence_1.getAllUsers)();
+            if (wasReconnect) {
+                // Reconnection within grace period — notify others to update socketId
+                socket.broadcast.emit("user_reconnected", user);
+            }
+            else {
+                // New user
+                socket.broadcast.emit("user_online", user);
+            }
+            callback({ success: true, user, onlineUsers });
+        });
+        // Get all online users
+        socket.on("get_online_users", (callback) => {
+            callback({ onlineUsers: (0, presence_1.getAllUsers)() });
+        });
+        // Send a private message to another user
+        socket.on("send_private_message", ({ toId, content }, callback) => {
+            const myPersistentId = (0, presence_1.getPersistentId)(socket.id);
+            if (!myPersistentId) {
+                callback({ success: false, error: "Usuario no registrado" });
+                return;
+            }
+            const fromUser = (0, presence_1.getAllUsers)().find((u) => u.persistentId === myPersistentId);
+            if (!fromUser) {
+                callback({ success: false, error: "Usuario no registrado" });
+                return;
+            }
+            // Store with persistentIds
+            const msg = (0, presence_1.addPrivateMessage)(myPersistentId, toId, fromUser.nickname, content);
+            // Route to target's current socket
+            const targetSocketId = (0, presence_1.getSocketId)(toId);
+            if (targetSocketId) {
+                io.to(targetSocketId).emit("private_message", msg);
+            }
+            callback({ success: true, message: msg });
+        });
+        // Get conversation history with a specific user
+        socket.on("get_private_messages", ({ withUserId }, callback) => {
+            const myPersistentId = (0, presence_1.getPersistentId)(socket.id);
+            if (!myPersistentId) {
+                callback({ messages: [] });
+                return;
+            }
+            const messages = (0, presence_1.getConversation)(myPersistentId, withUserId);
+            callback({ messages });
+        });
+        // Get private files shared in a conversation
+        socket.on("get_private_files", ({ withUserId }, callback) => {
+            const myPersistentId = (0, presence_1.getPersistentId)(socket.id);
+            if (!myPersistentId) {
+                callback({ files: [] });
+                return;
+            }
+            const files = (0, presence_1.getPrivateFiles)(myPersistentId, withUserId);
+            callback({ files });
+        });
+        // Incremental sync: get messages since a timestamp
+        socket.on("get_private_messages_since", ({ withUserId, since }, callback) => {
+            const myPersistentId = (0, presence_1.getPersistentId)(socket.id);
+            if (!myPersistentId) {
+                callback({ messages: [] });
+                return;
+            }
+            const allMessages = (0, presence_1.getConversation)(myPersistentId, withUserId);
+            const newMessages = allMessages.filter(m => m.createdAt > since);
+            callback({ messages: newMessages });
+        });
+        // Incremental sync: get files since a timestamp
+        socket.on("get_private_files_since", ({ withUserId, since }, callback) => {
+            const myPersistentId = (0, presence_1.getPersistentId)(socket.id);
+            if (!myPersistentId) {
+                callback({ files: [] });
+                return;
+            }
+            const allFiles = (0, presence_1.getPrivateFiles)(myPersistentId, withUserId);
+            const newFiles = allFiles.filter(f => f.createdAt > since);
+            callback({ files: newFiles });
+        });
         socket.on("create_room", ({ nickname, password, maxFileSize, customId }, callback) => {
             const settings = {};
             if (maxFileSize)
@@ -61,7 +144,8 @@ const setupSocket = (io) => {
                 io.to(room.id).emit("room_updated", (0, rooms_1.getRoom)(room.id));
             }
             catch (error) {
-                callback({ success: false, error: error.message || "Error al crear sala" });
+                const errorMsg = error instanceof Error ? error.message : "Error al crear sala";
+                callback({ success: false, error: errorMsg });
             }
         });
         socket.on("join_room", ({ roomId, nickname, password }, callback) => {
@@ -303,6 +387,12 @@ const setupSocket = (io) => {
             }
         });
         socket.on("disconnecting", () => {
+            // Grace period: don't remove user immediately, wait 15s
+            (0, presence_1.scheduleRemoveUser)(socket.id, (user) => {
+                // Only fires if user didn't reconnect within 15 seconds
+                io.emit("user_offline", { persistentId: user.persistentId });
+            });
+            // Rooms: leave immediately (reconnect_to_room handles re-joining)
             for (const roomId of socket.rooms) {
                 if (roomId !== socket.id) {
                     const room = (0, rooms_1.leaveRoom)(roomId, socket.id);

@@ -74,6 +74,11 @@ export function useRecentRooms(
     const onConnect = () => {
       checkActiveRecentRooms(socket);
     };
+
+    if (socket.connected) {
+      checkActiveRecentRooms(socket);
+    }
+
     socket.on("connect", onConnect);
     return () => {
       socket.off("connect", onConnect);

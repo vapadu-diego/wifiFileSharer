@@ -52,16 +52,19 @@ export default function Home() {
       if (savedNickname) {
         registerUser(socket, savedNickname, (users) => {
           setOnlineUsers(users);
-          setChatPartner(null);
-          setCurrentView("contacts");
+          setCurrentView((prev) => (prev === "name" ? "contacts" : prev));
         });
       }
       checkActiveRecentRooms(socket);
     };
 
+    if (socket.connected) {
+      onConnect();
+    }
+
     socket.on("connect", onConnect);
     return () => { socket.off("connect", onConnect); };
-  }, [socket, registerUser, checkActiveRecentRooms, setOnlineUsers, setChatPartner, setCurrentView]);
+  }, [socket, registerUser, checkActiveRecentRooms, setOnlineUsers, setCurrentView]);
 
   useEffect(() => {
     if (!socket) return;
@@ -287,7 +290,7 @@ export default function Home() {
         <RoomView
           socket={socket}
           room={room}
-          currentUserId={myPersistentId || socket.id || ""}
+          currentUserId={socket.id || ""}
           isGhost={isGhost}
           onRoomExited={handleRoomExited}
         />

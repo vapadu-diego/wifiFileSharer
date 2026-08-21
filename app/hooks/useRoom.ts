@@ -97,6 +97,10 @@ export function useRoom(
       }
     };
 
+    if (socket.connected) {
+      onConnect();
+    }
+
     socket.on("connect", onConnect);
     return () => {
       socket.off("connect", onConnect);
@@ -163,11 +167,17 @@ export function useRoom(
   };
 }
 
+interface StoredRecentRoom {
+  id: string;
+  password?: string;
+  joinedAt?: number;
+}
+
 function removeRecentFromStorage(roomId: string) {
   try {
     const stored = localStorage.getItem("wifi_sharer_recent_rooms");
     if (!stored) return;
-    const recent = JSON.parse(stored).filter((r: any) => r.id !== roomId);
+    const recent: StoredRecentRoom[] = JSON.parse(stored).filter((r: StoredRecentRoom) => r.id !== roomId);
     localStorage.setItem("wifi_sharer_recent_rooms", JSON.stringify(recent));
   } catch { /* empty */ }
 }
@@ -175,7 +185,9 @@ function removeRecentFromStorage(roomId: string) {
 function addRecentToStorage(roomId: string, password?: string) {
   try {
     const stored = localStorage.getItem("wifi_sharer_recent_rooms");
-    const recent = stored ? JSON.parse(stored).filter((r: any) => r.id !== roomId) : [];
+    const recent: StoredRecentRoom[] = stored
+      ? JSON.parse(stored).filter((r: StoredRecentRoom) => r.id !== roomId)
+      : [];
     recent.unshift({ id: roomId, password, joinedAt: Date.now() });
     if (recent.length > 10) recent.pop();
     localStorage.setItem("wifi_sharer_recent_rooms", JSON.stringify(recent));
