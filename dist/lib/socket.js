@@ -40,7 +40,6 @@ const setupSocket = (io) => {
         const isAdmin = isLocalhost(clientIp);
         // Tell client if they are admin
         socket.emit("admin_status", { isAdmin });
-        // Register presence with a nickname
         socket.on("register_user", ({ nickname, persistentId }, callback) => {
             const wasReconnect = (0, presence_1.cancelRemoveUser)(persistentId);
             const user = (0, presence_1.addUser)(socket.id, persistentId, nickname, os, browser);
@@ -99,6 +98,13 @@ const setupSocket = (io) => {
             }
             const files = (0, presence_1.getPrivateFiles)(myPersistentId, withUserId);
             callback({ files });
+        });
+        // P2P Synchronization events for chat history persistence (Option 3)
+        socket.on("private_sync_ping", ({ toSocketId, fromUserId, lastTimestamp }) => {
+            io.to(toSocketId).emit("private_sync_ping", { fromSocketId: socket.id, fromUserId, lastTimestamp });
+        });
+        socket.on("private_sync_data", ({ toSocketId, fromUserId, messages, files }) => {
+            io.to(toSocketId).emit("private_sync_data", { fromUserId, messages, files });
         });
         // Incremental sync: get messages since a timestamp
         socket.on("get_private_messages_since", ({ withUserId, since }, callback) => {

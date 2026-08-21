@@ -549,14 +549,25 @@ html, body {
 /* ============ MESSAGE BUBBLE ============ */
 .message-bubble {
   transition: background 0.2s ease;
+  position: relative;
 }
 
 .message-bubble:hover {
   background: rgba(255, 255, 255, 0.05) !important;
 }
 
-.message-bubble .copy-btn:hover {
-  opacity: 1 !important;
+.copy-btn-hover {
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 0.2s ease, visibility 0.2s ease, background-weight 0.2s ease;
+}
+
+.message-bubble:hover .copy-btn-hover,
+.copy-btn-hover.copied {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
 }
 
 /* ============ DESKTOP SIDEBAR ============ */

@@ -340,7 +340,7 @@ export default function RoomView({ socket, room, currentUserId, isGhost = false,
                           </button>
                         )}
                         <button
-                          className="copy-btn"
+                          className={`copy-btn copy-btn-hover ${copiedId === item.id ? "copied" : ""}`}
                           onClick={() => copyMessage(item.id, item.content)}
                           title="Copiar mensaje"
                           style={{

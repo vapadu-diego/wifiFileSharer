@@ -110,6 +110,7 @@ export default function PrivateChatView({
     });
   };
 
+
   // Autofocus input when chat opens or changes
   useEffect(() => {
     inputRef.current?.focus();
@@ -441,7 +442,7 @@ export default function PrivateChatView({
       { toId: partner.persistentId, content },
       (res: SendMessageResponse) => {
         if (res.success && res.message) {
-          const updated = addLocalMessage(myUserId, partner.userId, res.message);
+          const updated = addLocalMessage(myUserId, partner.persistentId, res.message);
           setMessages(updated);
         }
       },
@@ -470,7 +471,7 @@ export default function PrivateChatView({
       }
       const data = await res.json();
       if (data.success && data.file) {
-        const updated = addLocalFile(myUserId, partner.userId, data.file);
+        const updated = addLocalFile(myUserId, partner.persistentId, data.file);
         setFiles(updated);
       }
     } catch (err: unknown) {
@@ -625,7 +626,7 @@ export default function PrivateChatView({
               return (
                 <div
                   key={entry.id}
-                  className="animate-slideUp"
+                  className="message-bubble animate-slideUp"
                   style={{
                     alignSelf: isMine ? "flex-end" : "flex-start",
                     background: isMine
@@ -637,65 +638,61 @@ export default function PrivateChatView({
                     border: isMine
                       ? "1px solid rgba(168, 85, 247, 0.3)"
                       : "1px solid var(--card-border)",
+                    position: "relative",
                   }}
                 >
-                  <div
-                    style={{
-                      fontSize: "0.9rem",
-                      lineHeight: 1.5,
-                    }}
-                  >
-                    <FormattedMessage content={msg.content} />
-                  </div>
-                  <div
-                    className="text-muted"
-                    style={{
-                      fontSize: "0.65rem",
-                      marginTop: "4px",
-                      display: "flex",
-                      alignItems: "center",
-                      justifyContent: isMine ? "flex-end" : "flex-start",
-                      gap: "6px",
-                    }}>
-                    {!isMine && <span>{formatTime(msg.createdAt)}</span>}
-                    <button
-                      type="button"
-                      onClick={() => copyMessage(msg.id, msg.content)}
-                      title={copiedId === msg.id ? "Copiado" : "Copiar mensaje"}
+                  <div className="flex items-start justify-between gap-2">
+                    <div
                       style={{
-                        background: copiedId === msg.id ? "rgba(34, 197, 94, 0.2)" : "rgba(255,255,255,0.06)",
+                        fontSize: "0.9rem",
+                        lineHeight: 1.5,
+                        flex: 1,
+                      }}
+                    >
+                      <FormattedMessage content={msg.content} />
+                    </div>
+                    <button
+                      className={`copy-btn copy-btn-hover ${copiedId === msg.id ? "copied" : ""}`}
+                      onClick={() => copyMessage(msg.id, msg.content)}
+                      title="Copiar mensaje"
+                      style={{
+                        background: copiedId === msg.id ? "rgba(34, 197, 94, 0.2)" : "rgba(255,255,255,0.05)",
                         border: "none",
                         borderRadius: "4px",
                         cursor: "pointer",
-                        padding: "2px 5px",
-                        display: "inline-flex",
+                        padding: "4px",
+                        display: "flex",
                         alignItems: "center",
-                        gap: "3px",
-                        color: copiedId === msg.id ? "var(--success)" : "inherit",
-                        fontSize: "0.65rem",
+                        justifyContent: "center",
                         transition: "all 0.2s",
-                      }}>
+                        flexShrink: 0,
+                      }}
+                    >
                       {copiedId === msg.id ? (
-                        <>
-                          <svg width="10" height="10" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
-                            <polyline points="20 6 9 17 4 12" />
-                          </svg>
-                          <span>Copiado</span>
-                        </>
+                        <svg width="12" height="12" fill="none" stroke="var(--success)" strokeWidth="2" viewBox="0 0 24 24">
+                          <polyline points="20 6 9 17 4 12" />
+                        </svg>
                       ) : (
-                        <svg width="10" height="10" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                        <svg width="12" height="12" fill="none" stroke="var(--muted)" strokeWidth="2" viewBox="0 0 24 24">
                           <rect x="9" y="9" width="13" height="13" rx="2" />
                           <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
                         </svg>
                       )}
                     </button>
-                    {isMine && (
-                      <span>
-                        {pendingIds.has(msg.id)
-                          ? <span style={{ color: "var(--warning)" }}>⏳ Pendiente</span>
-                          : formatTime(msg.createdAt)
-                        }
-                      </span>
+                  </div>
+                  <div
+                    className="text-muted"
+                    style={{
+                      fontSize: "0.65rem",
+                      marginTop: "2px",
+                      marginBottom: -2,
+                      textAlign: isMine ? "right" : "left",
+                    }}
+                  >
+                    {isMine && pendingIds.has(msg.id) ? (
+                      <span style={{ color: "var(--warning)" }}>⏳ Pendiente</span>
+                    ) : (
+                      formatTime(msg.createdAt)
                     )}
                   </div>
                 </div>

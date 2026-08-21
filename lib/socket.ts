@@ -121,6 +121,7 @@ export const setupSocket = (io: Server) => {
       const allFiles = getPrivateFiles(myPersistentId, withUserId);
       const newFiles = allFiles.filter(f => f.createdAt > since);
       callback({ files: newFiles });
+    });
 
     socket.on("create_room", ({ nickname, password, maxFileSize, customId }, callback) => {
       const settings: Partial<RoomSettings> = {};

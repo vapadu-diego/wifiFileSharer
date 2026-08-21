@@ -19,6 +19,8 @@
   "exclude": [
     "node_modules",
     ".next",
-    "app"
+    "app",
+    "lib/chatPersistence.ts",
+    "lib/notifications.ts"
   ]
 }
