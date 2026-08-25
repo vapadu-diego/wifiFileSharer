@@ -1,6 +1,6 @@
 import { Server, Socket } from "socket.io";
 import { createRoom, joinRoom, joinRoomAsGhost, leaveRoom, addTextToRoom, getRoom, getAllRooms, kickUser, banUserIp, deleteRoom, removeFileFromRoom, removeTextFromRoom, updateUserSocketId, checkRoomsExist } from "./rooms";
-import { addUser, removeUser, scheduleRemoveUser, cancelRemoveUser, getAllUsers, getPersistentId, getSocketId, addPrivateMessage, getConversation, getPrivateFiles } from "./presence";
+import { addUser, scheduleRemoveUser, cancelRemoveUser, getAllUsers, getPersistentId, getSocketId, addPrivateMessage, getConversation, getPrivateFiles, editPrivateMessage, deletePrivateMessage } from "./presence";
 import { User, SharedText, RoomSettings } from "./types";
 
 function parseUserAgent(ua: string): { os: string; browser: string } {
@@ -78,6 +78,55 @@ export const setupSocket = (io: Server) => {
         io.to(targetSocketId).emit("private_message", msg);
       }
       callback({ success: true, message: msg });
+    });
+
+    // Edit a private message
+    socket.on("edit_private_message", ({ id, toId, content }, callback) => {
+      const myPersistentId = getPersistentId(socket.id);
+      if (!myPersistentId) {
+        callback({ success: false, error: "Usuario no registrado" });
+        return;
+      }
+      const updatedMsg = editPrivateMessage(myPersistentId, toId, id, content);
+      const targetSocketId = getSocketId(toId);
+      if (targetSocketId) {
+        io.to(targetSocketId).emit("private_message_edited", {
+          id,
+          fromId: myPersistentId,
+          content,
+          updatedAt: updatedMsg ? updatedMsg.updatedAt : Date.now(),
+        });
+      }
+      callback({
+        success: true,
+        message: updatedMsg || {
+          id,
+          fromId: myPersistentId,
+          toId,
+          fromName: "",
+          content,
+          createdAt: Date.now(),
+          updatedAt: Date.now(),
+        },
+      });
+    });
+
+    // Delete a private message
+    socket.on("delete_private_message", ({ id, toId }, callback) => {
+      const myPersistentId = getPersistentId(socket.id);
+      if (!myPersistentId) {
+        callback({ success: false, error: "Usuario no registrado" });
+        return;
+      }
+      deletePrivateMessage(myPersistentId, toId, id);
+      const targetSocketId = getSocketId(toId);
+      if (targetSocketId) {
+        io.to(targetSocketId).emit("private_message_deleted", {
+          id,
+          fromId: myPersistentId,
+        });
+      }
+      callback({ success: true });
     });
 
     // Get conversation history with a specific user

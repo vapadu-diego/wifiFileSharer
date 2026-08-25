@@ -15,7 +15,8 @@ interface JoinRoomResponse {
 export function useRoom(
   socket: Socket | null,
   showModal: (title: string, message: string, type: "info" | "warning" | "error") => void,
-  onNewMessage?: () => void
+  onNewMessage?: () => void,
+  onToast?: (toast: { icon: string; title: string; body: string }) => void
 ) {
   const [room, setRoom] = useState<Room | null>(null);
   const [isGhost, setIsGhost] = useState(false);
@@ -66,6 +67,13 @@ export function useRoom(
           `💬 ${text.senderName} (Sala)`,
           text.content.length > 100 ? text.content.slice(0, 100) + "…" : text.content
         );
+        if (currentView !== "room") {
+          onToast?.({
+            icon: "💬",
+            title: `${text.senderName} (Sala)`,
+            body: text.content.length > 100 ? text.content.slice(0, 100) + "…" : text.content,
+          });
+        }
         onNewMessage?.();
       }
     };
@@ -77,6 +85,13 @@ export function useRoom(
           `📎 ${file.senderName} (Sala)`,
           `Subió un archivo: ${file.name}`
         );
+        if (currentView !== "room") {
+          onToast?.({
+            icon: "📎",
+            title: `${file.senderName} (Sala)`,
+            body: `Subió un archivo: ${file.name}`,
+          });
+        }
         onNewMessage?.();
       }
     };
@@ -96,7 +111,7 @@ export function useRoom(
       socket.off("new_text", handleNewText);
       socket.off("file_uploaded", handleFileUploaded);
     };
-  }, [socket, showModal]);
+  }, [socket, showModal, currentView, onNewMessage, onToast]);
 
   useEffect(() => {
     if (!socket) return;

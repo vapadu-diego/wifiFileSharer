@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.getPrivateFileById = exports.getPrivateFiles = exports.addPrivateFile = exports.getConversation = exports.addPrivateMessage = exports.getSocketId = exports.getPersistentId = exports.getUser = exports.getAllUsers = exports.cancelRemoveUser = exports.scheduleRemoveUser = exports.removeUser = exports.addUser = void 0;
+exports.getPrivateFileById = exports.getPrivateFiles = exports.addPrivateFile = exports.deletePrivateMessage = exports.editPrivateMessage = exports.getConversation = exports.addPrivateMessage = exports.getSocketId = exports.getPersistentId = exports.getUser = exports.getAllUsers = exports.cancelRemoveUser = exports.scheduleRemoveUser = exports.removeUser = exports.addUser = void 0;
 // Maps use persistentId as key (stable across reconnections)
 const onlineUsers = new Map(); // persistentId → OnlineUser
 const socketToPersistent = new Map(); // socketId → persistentId
@@ -117,6 +117,30 @@ const getConversation = (userId1, userId2) => {
     return privateConversations.get(key) || [];
 };
 exports.getConversation = getConversation;
+const editPrivateMessage = (fromId, toId, messageId, newContent) => {
+    const key = conversationKey(fromId, toId);
+    const messages = privateConversations.get(key);
+    if (!messages)
+        return undefined;
+    const msg = messages.find((m) => m.id === messageId);
+    if (msg) {
+        msg.content = newContent;
+        msg.updatedAt = Date.now();
+    }
+    return msg;
+};
+exports.editPrivateMessage = editPrivateMessage;
+const deletePrivateMessage = (fromId, toId, messageId) => {
+    const key = conversationKey(fromId, toId);
+    const messages = privateConversations.get(key);
+    if (!messages)
+        return false;
+    const initialLength = messages.length;
+    const filtered = messages.filter((m) => m.id !== messageId);
+    privateConversations.set(key, filtered);
+    return filtered.length < initialLength;
+};
+exports.deletePrivateMessage = deletePrivateMessage;
 // --- Private files ---
 const privateFiles = new Map();
 const addPrivateFile = (file) => {

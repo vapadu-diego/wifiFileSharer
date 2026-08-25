@@ -79,6 +79,53 @@ const setupSocket = (io) => {
             }
             callback({ success: true, message: msg });
         });
+        // Edit a private message
+        socket.on("edit_private_message", ({ id, toId, content }, callback) => {
+            const myPersistentId = (0, presence_1.getPersistentId)(socket.id);
+            if (!myPersistentId) {
+                callback({ success: false, error: "Usuario no registrado" });
+                return;
+            }
+            const updatedMsg = (0, presence_1.editPrivateMessage)(myPersistentId, toId, id, content);
+            const targetSocketId = (0, presence_1.getSocketId)(toId);
+            if (targetSocketId) {
+                io.to(targetSocketId).emit("private_message_edited", {
+                    id,
+                    fromId: myPersistentId,
+                    content,
+                    updatedAt: updatedMsg ? updatedMsg.updatedAt : Date.now(),
+                });
+            }
+            callback({
+                success: true,
+                message: updatedMsg || {
+                    id,
+                    fromId: myPersistentId,
+                    toId,
+                    fromName: "",
+                    content,
+                    createdAt: Date.now(),
+                    updatedAt: Date.now(),
+                },
+            });
+        });
+        // Delete a private message
+        socket.on("delete_private_message", ({ id, toId }, callback) => {
+            const myPersistentId = (0, presence_1.getPersistentId)(socket.id);
+            if (!myPersistentId) {
+                callback({ success: false, error: "Usuario no registrado" });
+                return;
+            }
+            (0, presence_1.deletePrivateMessage)(myPersistentId, toId, id);
+            const targetSocketId = (0, presence_1.getSocketId)(toId);
+            if (targetSocketId) {
+                io.to(targetSocketId).emit("private_message_deleted", {
+                    id,
+                    fromId: myPersistentId,
+                });
+            }
+            callback({ success: true });
+        });
         // Get conversation history with a specific user
         socket.on("get_private_messages", ({ withUserId }, callback) => {
             const myPersistentId = (0, presence_1.getPersistentId)(socket.id);

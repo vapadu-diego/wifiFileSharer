@@ -73,6 +73,7 @@ export interface PrivateMessage {
   fromName: string;
   content: string;
   createdAt: number;
+  updatedAt?: number;
 }
 
 export interface PrivateFile {

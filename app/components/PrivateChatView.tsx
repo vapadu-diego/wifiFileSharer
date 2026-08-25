@@ -1,23 +1,31 @@
 "use client";
 
-import { useState, useRef, useEffect, FormEvent, DragEvent } from "react";
+import { useState, useRef, useEffect, useLayoutEffect, FormEvent, DragEvent } from "react";
 import { Socket } from "socket.io-client";
+import {
+  FormatSuggestionsDropdown,
+  getCommandQuery,
+  handleSuggestionsKeyDown,
+  FORMAT_OPTIONS,
+} from "./FormatSuggestions";
 import {
   OnlineUser,
   PrivateMessage,
   PrivateFile,
-  getFileCategory,
 } from "@/lib/types";
 import { generateUUID } from "@/app/hooks/useSession";
 import FileIcon from "./FileIcon";
 import FormattedMessage from "./FormattedMessage";
+import { formatJsonContent } from "@/lib/jsonFormat";
 import {
   getLocalMessages,
   saveLocalMessages,
   addLocalMessage,
   getLocalFiles,
   saveLocalFiles,
-  addLocalFile
+  addLocalFile,
+  editLocalMessage,
+  deleteLocalMessage
 } from "@/lib/chatPersistence";
 
 interface PrivateChatViewProps {
@@ -40,6 +48,11 @@ interface FilesResponse {
 interface SendMessageResponse {
   success: boolean;
   message?: PrivateMessage;
+}
+
+interface MutationResponse {
+  success: boolean;
+  error?: string;
 }
 
 interface ChatEntry {
@@ -75,11 +88,17 @@ function copyToClipboard(text: string): Promise<void> {
     textArea.focus();
     textArea.select();
     return new Promise((resolve, reject) => {
-      document.execCommand("copy") ? resolve() : reject();
+      if (document.execCommand("copy")) {
+        resolve();
+      } else {
+        reject();
+      }
       textArea.remove();
     });
   }
 }
+
+const PAGE_SIZE = 30;
 
 export default function PrivateChatView({
   socket,
@@ -96,12 +115,26 @@ export default function PrivateChatView({
   const [dragActive, setDragActive] = useState(false);
   const [uploadError, setUploadError] = useState("");
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const isAtBottomRef = useRef(true);
+  const initialLoadDoneRef = useRef(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const contextMenuRef = useRef<HTMLDivElement>(null);
   const lastSyncTimeRef = useRef(0);
   const pendingQueueRef = useRef<Array<{ tempId: string; content: string; createdAt: number }>>([]);
   const [pendingIds, setPendingIds] = useState<Set<string>>(new Set());
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; messageId: string; content: string } | null>(null);
+  const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
+  const [editingText, setEditingText] = useState("");
+  const [editingOriginalText, setEditingOriginalText] = useState("");
+
+  // Suggestions state
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  const [slashInfo, setSlashInfo] = useState<{ query: string; slashIndex: number } | null>(null);
+  const [selectedIndex, setSelectedIndex] = useState(0);
 
   const copyMessage = (id: string, text: string) => {
     copyToClipboard(text).then(() => {
@@ -110,22 +143,112 @@ export default function PrivateChatView({
     });
   };
 
+  const handleContextMenu = (e: React.MouseEvent, msg: PrivateMessage) => {
+    const isMine = msg.fromId === currentUserId;
+    if (!isMine) return; // Only allow context menu for own messages
+    e.preventDefault();
+    const MENU_WIDTH = 130;
+    const MENU_HEIGHT = 85;
+    const x = Math.max(10, Math.min(e.clientX, window.innerWidth - MENU_WIDTH - 10));
+    const y = Math.max(10, Math.min(e.clientY, window.innerHeight - MENU_HEIGHT - 10));
+    setContextMenu({
+      x,
+      y,
+      messageId: msg.id,
+      content: msg.content,
+    });
+  };
+
+  const startEdit = () => {
+    if (!contextMenu) return;
+    setEditingMessageId(contextMenu.messageId);
+    setEditingText(contextMenu.content);
+    setEditingOriginalText(contextMenu.content);
+    setContextMenu(null);
+  };
+
+  const cancelEdit = () => {
+    setEditingMessageId(null);
+    setEditingText("");
+    setEditingOriginalText("");
+  };
+
+  const hasEditChanges = editingMessageId !== null && editingText.trim() !== editingOriginalText.trim();
+
+  const saveEdit = () => {
+    if (!hasEditChanges || !editingMessageId) return;
+
+    let content = editingText.trim();
+    content = formatJsonContent(content);
+
+    socket.emit(
+      "edit_private_message",
+      { id: editingMessageId, toId: partner.persistentId, content },
+      (res: MutationResponse) => {
+        if (res.success) {
+          const updated = editLocalMessage(myUserId, partner.persistentId, editingMessageId, content);
+          setMessages(updated);
+          cancelEdit();
+        }
+      }
+    );
+  };
+
+  const deleteMsg = () => {
+    if (!contextMenu) return;
+    socket.emit(
+      "delete_private_message",
+      { id: contextMenu.messageId, toId: partner.persistentId },
+      (res: MutationResponse) => {
+        if (res.success) {
+          const updated = deleteLocalMessage(myUserId, partner.persistentId, contextMenu.messageId);
+          setMessages(updated);
+          setContextMenu(null);
+        }
+      }
+    );
+  };
+
 
   // Autofocus input when chat opens or changes
   useEffect(() => {
     inputRef.current?.focus();
+    isAtBottomRef.current = true;
+    initialLoadDoneRef.current = false;
+    setVisibleCount(PAGE_SIZE);
   }, [partner.persistentId]);
+
+  // Auto-expand textarea based on content (up to 7 lines)
+  useEffect(() => {
+    const textarea = inputRef.current;
+    if (!textarea) return;
+    textarea.style.height = "auto";
+    textarea.style.height = `${Math.min(textarea.scrollHeight, 160)}px`;
+  }, [text]);
 
   // Close chat on ESC key
   useEffect(() => {
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
+        if (showSuggestions || editingMessageId) return;
         onBack();
       }
     };
     window.addEventListener("keydown", handleGlobalKeyDown);
     return () => window.removeEventListener("keydown", handleGlobalKeyDown);
-  }, [onBack]);
+  }, [onBack, showSuggestions, editingMessageId]);
+
+  // Close context menu on click anywhere
+  useEffect(() => {
+    const handleOuterClick = (e: MouseEvent) => {
+      if (contextMenuRef.current && contextMenuRef.current.contains(e.target as Node)) {
+        return;
+      }
+      setContextMenu(null);
+    };
+    window.addEventListener("click", handleOuterClick);
+    return () => window.removeEventListener("click", handleOuterClick);
+  }, []);
 
   // Load local history & resync
   useEffect(() => {
@@ -154,6 +277,7 @@ export default function PrivateChatView({
                 return updated;
               });
             }
+            setTimeout(() => { initialLoadDoneRef.current = true; }, 0);
           }
         );
         socket.emit("get_private_files_since",
@@ -168,6 +292,7 @@ export default function PrivateChatView({
                 return updated;
               });
             }
+            setTimeout(() => { initialLoadDoneRef.current = true; }, 0);
           }
         );
       } else {
@@ -178,6 +303,7 @@ export default function PrivateChatView({
               setMessages(res.messages);
               saveLocalMessages(myUserId, partner.persistentId, res.messages);
             }
+            setTimeout(() => { initialLoadDoneRef.current = true; }, 0);
           }
         );
         socket.emit("get_private_files",
@@ -187,6 +313,7 @@ export default function PrivateChatView({
               setFiles(res.files);
               saveLocalFiles(myUserId, partner.persistentId, res.files);
             }
+            setTimeout(() => { initialLoadDoneRef.current = true; }, 0);
           }
         );
       }
@@ -242,8 +369,8 @@ export default function PrivateChatView({
     const syncDataHandler = (data: { fromUserId: string; messages: PrivateMessage[]; files: PrivateFile[] }) => {
       if (data.fromUserId !== partner.persistentId) return;
 
-      let updatedMsgs = [...getLocalMessages(myUserId, partner.persistentId)];
-      let updatedFls = [...getLocalFiles(myUserId, partner.persistentId)];
+      const updatedMsgs = [...getLocalMessages(myUserId, partner.persistentId)];
+      const updatedFls = [...getLocalFiles(myUserId, partner.persistentId)];
 
       let changed = false;
       if (data.messages && data.messages.length > 0) {
@@ -305,11 +432,33 @@ export default function PrivateChatView({
         setFiles(updated);
       }
     };
+    const msgEditedHandler = ({ id, fromId, content }: { id: string; fromId: string; content: string }) => {
+      if (fromId === partner.persistentId || fromId === currentUserId) {
+        setMessages((prev) =>
+          prev.map((m) => {
+            if (m.id === id) {
+              return { ...m, content, updatedAt: Date.now() };
+            }
+            return m;
+          })
+        );
+      }
+    };
+    const msgDeletedHandler = ({ id, fromId }: { id: string; fromId: string }) => {
+      if (fromId === partner.persistentId || fromId === currentUserId) {
+        setMessages((prev) => prev.filter((m) => m.id !== id));
+      }
+    };
+
     socket.on("private_message", msgHandler);
     socket.on("private_file", fileHandler);
+    socket.on("private_message_edited", msgEditedHandler);
+    socket.on("private_message_deleted", msgDeletedHandler);
     return () => {
       socket.off("private_message", msgHandler);
       socket.off("private_file", fileHandler);
+      socket.off("private_message_edited", msgEditedHandler);
+      socket.off("private_message_deleted", msgDeletedHandler);
     };
   }, [socket, partner.persistentId, myUserId, currentUserId]);
 
@@ -329,9 +478,33 @@ export default function PrivateChatView({
     })),
   ].sort((a, b) => a.createdAt - b.createdAt);
 
+  const visibleEntries = entries.slice(-visibleCount);
+
+  const handleMessagesScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    const container = e.currentTarget;
+    isAtBottomRef.current = container.scrollHeight - container.scrollTop - container.clientHeight < 50;
+
+    if (container.scrollTop === 0 && visibleCount < entries.length) {
+      const oldScrollHeight = container.scrollHeight;
+      setVisibleCount((prev) => Math.min(prev + PAGE_SIZE, entries.length));
+      requestAnimationFrame(() => {
+        container.scrollTop = container.scrollHeight - oldScrollHeight;
+      });
+    }
+  };
+
+  // Anchor to bottom before first paint during the initial load
+  useLayoutEffect(() => {
+    if (!isAtBottomRef.current || initialLoadDoneRef.current) return;
+    const container = messagesContainerRef.current;
+    if (container) container.scrollTop = container.scrollHeight;
+  }, [entries.length, partner.persistentId]);
+
+  // Smooth-scroll to bottom for incoming messages once initial load is done
   useEffect(() => {
+    if (!isAtBottomRef.current || !initialLoadDoneRef.current) return;
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [entries.length]);
+  }, [entries.length, partner.persistentId]);
 
   // Track last sync timestamp for incremental resync
   useEffect(() => {
@@ -417,8 +590,12 @@ export default function PrivateChatView({
   // Send text message (with offline queue support)
   const sendMessage = () => {
     if (!text.trim()) return;
-    const content = text.trim();
+
+    let content = text.trim();
+    content = formatJsonContent(content);
+
     setText("");
+    setShowSuggestions(false);
     inputRef.current?.focus();
 
     if (!socket.connected) {
@@ -506,7 +683,72 @@ export default function PrivateChatView({
     }
   };
 
+  const handleSelectOption = (option: typeof FORMAT_OPTIONS[0]) => {
+    if (!slashInfo || !inputRef.current) return;
+    const textarea = inputRef.current;
+    const val = textarea.value;
+    const before = val.slice(0, slashInfo.slashIndex);
+    const after = val.slice(textarea.selectionEnd || 0);
+    const newText = before + option.insertText + after;
+    setText(newText);
+    setShowSuggestions(false);
+
+    const newCursorPos = slashInfo.slashIndex + option.cursorOffset;
+    setTimeout(() => {
+      textarea.focus();
+      textarea.setSelectionRange(newCursorPos, newCursorPos);
+    }, 0);
+  };
+
+  const handleTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    const val = e.target.value;
+    setText(val);
+    const cmd = getCommandQuery(val, e.target.selectionEnd || 0);
+    if (cmd) {
+      setSlashInfo(cmd);
+      setShowSuggestions(true);
+      setSelectedIndex((prev) => (slashInfo?.query === cmd.query ? prev : 0));
+    } else {
+      setShowSuggestions(false);
+    }
+  };
+
+  const handleKeyUp = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
+    const target = e.currentTarget;
+    const cmd = getCommandQuery(target.value, target.selectionEnd || 0);
+    if (cmd && e.key !== "Escape") {
+      setSlashInfo(cmd);
+      setShowSuggestions(true);
+    } else {
+      setShowSuggestions(false);
+    }
+  };
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
+    if (showSuggestions && slashInfo) {
+      const filtered = FORMAT_OPTIONS.filter((opt) =>
+        opt.label.toLowerCase().includes(slashInfo.query) ||
+        opt.searchKeys.some((key) => key.includes(slashInfo.query))
+      );
+
+      const handled = handleSuggestionsKeyDown(
+        e,
+        showSuggestions,
+        filtered.length,
+        selectedIndex,
+        setSelectedIndex,
+        (idx) => {
+          const option = filtered[idx];
+          if (option) {
+            handleSelectOption(option);
+          }
+        },
+        () => setShowSuggestions(false)
+      );
+
+      if (handled) return;
+    }
+
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       sendMessage();
@@ -605,6 +847,8 @@ export default function PrivateChatView({
         onDragLeave={handleDrag}
         onDragOver={handleDrag}
         onDrop={handleDrop}
+        onScroll={handleMessagesScroll}
+        ref={messagesContainerRef}
       >
         {entries.length === 0 ? (
           <div
@@ -619,7 +863,7 @@ export default function PrivateChatView({
             Inicia una conversación con {partner.nickname}
           </div>
         ) : (
-          entries.map((entry) => {
+          visibleEntries.map((entry) => {
             if (entry.type === "message") {
               const msg = entry.data as PrivateMessage;
               const isMine = msg.fromId === currentUserId;
@@ -627,6 +871,7 @@ export default function PrivateChatView({
                 <div
                   key={entry.id}
                   className="message-bubble animate-slideUp"
+                  onContextMenu={(e) => handleContextMenu(e, msg)}
                   style={{
                     alignSelf: isMine ? "flex-end" : "flex-start",
                     background: isMine
@@ -639,62 +884,160 @@ export default function PrivateChatView({
                       ? "1px solid rgba(168, 85, 247, 0.3)"
                       : "1px solid var(--card-border)",
                     position: "relative",
+                    cursor: isMine ? "text" : "default",
                   }}
                 >
-                  <div className="flex items-start justify-between gap-2">
-                    <div
-                      style={{
-                        fontSize: "0.9rem",
-                        lineHeight: 1.5,
-                        flex: 1,
-                      }}
-                    >
-                      <FormattedMessage content={msg.content} />
+                  {editingMessageId === msg.id ? (
+                    <div className="flex flex-col gap-2" style={{ width: "100%", minWidth: "280px", maxWidth: "600px" }}>
+                      <textarea
+                        className="input"
+                        style={{
+                          width: "100%",
+                          background: "rgba(0,0,0,0.3)",
+                          border: "1px solid var(--primary)",
+                          borderRadius: "4px",
+                          color: "#fff",
+                          fontSize: "0.9rem",
+                          padding: "8px 10px",
+                          resize: "none",
+                          height: `${Math.min(Math.max(editingText.split("\n").length * 20 + 20, 100), 160)}px`,
+                          minHeight: "100px",
+                          maxHeight: "160px",
+                          lineHeight: "1.4",
+                          fontFamily: "monospace",
+                        }}
+                        value={editingText}
+                        onChange={(e) => setEditingText(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === "Escape") {
+                            e.stopPropagation();
+                            cancelEdit();
+                          }
+                          if (e.key === "Enter" && !e.shiftKey) {
+                            e.preventDefault();
+                            saveEdit();
+                          }
+                        }}
+                        autoFocus
+                      />
+                      <div className="flex gap-2 justify-end">
+                        <button
+                          type="button"
+                          className="btn btn-ghost"
+                          onClick={cancelEdit}
+                          style={{ fontSize: "0.75rem", padding: "2px 8px", height: "24px", minHeight: "24px" }}
+                        >
+                          Cancelar
+                        </button>
+                        <button
+                          type="button"
+                          className="btn btn-primary"
+                          onClick={saveEdit}
+                          style={{ fontSize: "0.75rem", padding: "2px 8px", height: "24px", minHeight: "24px" }}
+                          disabled={!hasEditChanges}
+                        >
+                          Guardar
+                        </button>
+                      </div>
                     </div>
-                    <button
-                      className={`copy-btn copy-btn-hover ${copiedId === msg.id ? "copied" : ""}`}
-                      onClick={() => copyMessage(msg.id, msg.content)}
-                      title="Copiar mensaje"
-                      style={{
-                        background: copiedId === msg.id ? "rgba(34, 197, 94, 0.2)" : "rgba(255,255,255,0.05)",
-                        border: "none",
-                        borderRadius: "4px",
-                        cursor: "pointer",
-                        padding: "4px",
-                        display: "flex",
-                        alignItems: "center",
-                        justifyContent: "center",
-                        transition: "all 0.2s",
-                        flexShrink: 0,
-                      }}
-                    >
-                      {copiedId === msg.id ? (
-                        <svg width="12" height="12" fill="none" stroke="var(--success)" strokeWidth="2" viewBox="0 0 24 24">
-                          <polyline points="20 6 9 17 4 12" />
-                        </svg>
-                      ) : (
-                        <svg width="12" height="12" fill="none" stroke="var(--muted)" strokeWidth="2" viewBox="0 0 24 24">
-                          <rect x="9" y="9" width="13" height="13" rx="2" />
-                          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-                        </svg>
-                      )}
-                    </button>
-                  </div>
-                  <div
-                    className="text-muted"
-                    style={{
-                      fontSize: "0.65rem",
-                      marginTop: "2px",
-                      marginBottom: -2,
-                      textAlign: isMine ? "right" : "left",
-                    }}
-                  >
-                    {isMine && pendingIds.has(msg.id) ? (
-                      <span style={{ color: "var(--warning)" }}>⏳ Pendiente</span>
-                    ) : (
-                      formatTime(msg.createdAt)
-                    )}
-                  </div>
+                  ) : (
+                    <>
+                      <div
+                        style={{
+                          fontSize: "0.9rem",
+                          lineHeight: 1.5,
+                        }}
+                      >
+                        <FormattedMessage content={msg.content} />
+                      </div>
+                      <div
+                        className="flex items-center gap-1 text-muted"
+                        style={{
+                          fontSize: "0.65rem",
+                          marginTop: "4px",
+                          marginBottom: -2,
+                          justifyContent: isMine ? "flex-end" : "flex-start",
+                        }}
+                      >
+                        {isMine ? (
+                          <>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                copyMessage(msg.id, msg.content);
+                              }}
+                              title="Copiar mensaje"
+                              style={{
+                                background: "none",
+                                border: "none",
+                                cursor: "pointer",
+                                padding: 0,
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "center",
+                                color: copiedId === msg.id ? "var(--success)" : "currentColor",
+                                opacity: 0.6,
+                                transition: "all 0.2s",
+                              }}
+                            >
+                              {copiedId === msg.id ? (
+                                <svg width="11" height="11" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+                                  <polyline points="20 6 9 17 4 12" />
+                                </svg>
+                              ) : (
+                                <svg width="11" height="11" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+                                  <rect x="9" y="9" width="13" height="13" rx="2" />
+                                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                                </svg>
+                              )}
+                            </button>
+                            {pendingIds.has(msg.id) ? (
+                              <span style={{ color: "var(--warning)" }}>⏳ Pendiente</span>
+                            ) : (
+                              <span className="flex items-center gap-1">
+                                {msg.updatedAt && <span style={{ opacity: 0.6 }}>(editado)</span>}
+                                <span>{formatTime(msg.createdAt)}</span>
+                              </span>
+                            )}
+                          </>
+                        ) : (
+                          <>
+                            <span>{formatTime(msg.createdAt)}</span>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                copyMessage(msg.id, msg.content);
+                              }}
+                              title="Copiar mensaje"
+                              style={{
+                                background: "none",
+                                border: "none",
+                                cursor: "pointer",
+                                padding: 0,
+                                display: "flex",
+                                alignItems: "center",
+                                justifyContent: "center",
+                                color: copiedId === msg.id ? "var(--success)" : "currentColor",
+                                opacity: 0.6,
+                                transition: "all 0.2s",
+                              }}
+                            >
+                              {copiedId === msg.id ? (
+                                <svg width="11" height="11" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+                                  <polyline points="20 6 9 17 4 12" />
+                                </svg>
+                              ) : (
+                                <svg width="11" height="11" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+                                  <rect x="9" y="9" width="13" height="13" rx="2" />
+                                  <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
+                                </svg>
+                              )}
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    </>
+                  )}
                 </div>
               );
             } else {
@@ -739,6 +1082,12 @@ export default function PrivateChatView({
                             "_blank",
                           )
                         }
+                        onLoad={() => {
+                          const container = messagesContainerRef.current;
+                          if (container && isAtBottomRef.current) {
+                            container.scrollTop = container.scrollHeight;
+                          }
+                        }}
                       />
                       <div
                         style={{
@@ -910,6 +1259,14 @@ export default function PrivateChatView({
           position: "relative",
         }}
       >
+        {showSuggestions && slashInfo && (
+          <FormatSuggestionsDropdown
+            query={slashInfo.query}
+            selectedIndex={selectedIndex}
+            onSelect={handleSelectOption}
+            onClose={() => setShowSuggestions(false)}
+          />
+        )}
         <input
           ref={fileInputRef}
           type="file"
@@ -958,16 +1315,18 @@ export default function PrivateChatView({
             marginBottom: 0,
             flex: 1,
             minHeight: "40px",
-            maxHeight: "100px",
+            maxHeight: "160px",
             resize: "none",
             padding: "10px",
             lineHeight: "1.4",
             fontSize: "0.9rem",
+            overflowY: "auto",
           }}
           value={text}
-          onChange={(e) => setText(e.target.value)}
+          onChange={handleTextChange}
+          onKeyUp={handleKeyUp}
           onKeyDown={handleKeyDown}
-          placeholder="Escribe un mensaje..."
+          placeholder="Escribe un mensaje... (o '/' para formatos)"
           rows={1}
         />
         <button
@@ -993,6 +1352,88 @@ export default function PrivateChatView({
           </svg>
         </button>
       </form>
+
+      {/* Context Menu */}
+      {contextMenu && (() => {
+        const menuWidth = 130;
+        const menuHeight = 85;
+        const menuX = typeof window !== "undefined" && contextMenu.x + menuWidth > window.innerWidth
+          ? window.innerWidth - menuWidth - 10
+          : contextMenu.x;
+        const menuY = typeof window !== "undefined" && contextMenu.y + menuHeight > window.innerHeight
+          ? window.innerHeight - menuHeight - 10
+          : contextMenu.y;
+
+        return (
+          <div
+            ref={contextMenuRef}
+            style={{
+              position: "fixed",
+              top: menuY,
+              left: menuX,
+              zIndex: 9999,
+              background: "var(--card-bg, #1e1e2e)",
+              border: "1px solid var(--card-border, rgba(255,255,255,0.08))",
+              borderRadius: "6px",
+              boxShadow: "0 4px 12px rgba(0,0,0,0.5)",
+              padding: "4px",
+              display: "flex",
+              flexDirection: "column",
+              minWidth: "120px",
+            }}
+            onClick={(e) => e.stopPropagation()} // Prevent click through closing it immediately
+          >
+            <button
+              type="button"
+              onClick={startEdit}
+              style={{
+                background: "none",
+                border: "none",
+                color: "#fff",
+                padding: "6px 12px",
+                textAlign: "left",
+                fontSize: "0.8rem",
+                cursor: "pointer",
+                borderRadius: "4px",
+                display: "flex",
+                alignItems: "center",
+                gap: "8px",
+              }}
+              className="context-menu-item"
+            >
+              <svg width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                <path d="M18.5 2.5a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4z" />
+              </svg>
+              Editar
+            </button>
+            <button
+              type="button"
+              onClick={deleteMsg}
+              style={{
+                background: "none",
+                border: "none",
+                color: "var(--danger, #ef4444)",
+                padding: "6px 12px",
+                textAlign: "left",
+                fontSize: "0.8rem",
+                cursor: "pointer",
+                borderRadius: "4px",
+                display: "flex",
+                alignItems: "center",
+                gap: "8px",
+              }}
+              className="context-menu-item danger"
+            >
+              <svg width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                <polyline points="3 6 5 6 21 6" />
+                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+              </svg>
+              Eliminar
+            </button>
+          </div>
+        );
+      })()}
     </div>
   );
 }

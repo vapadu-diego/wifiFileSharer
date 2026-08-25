@@ -9,6 +9,8 @@ import { useSession } from "./hooks/useSession";
 import { useContacts } from "./hooks/useContacts";
 import { useRoom } from "./hooks/useRoom";
 import { useRecentRooms, RecentRoom } from "./hooks/useRecentRooms";
+import { useToasts } from "./hooks/useToasts";
+import { useFaviconBadge } from "./hooks/useFaviconBadge";
 import { requestNotificationPermission } from "@/lib/notifications";
 import ConnectForm from "./components/ConnectForm";
 import OnlineContactsView from "./components/OnlineContactsView";
@@ -17,6 +19,7 @@ import RoomView from "./components/RoomView";
 import AdminPanel from "./components/AdminPanel";
 import Modal from "./components/Modal";
 import ChatLayout from "./components/ChatLayout";
+import { ToastStack } from "./components/ToastStack";
 
 const RECENT_ROOMS_KEY = "wifi_sharer_recent_rooms";
 
@@ -37,6 +40,8 @@ export default function Home() {
   const [showRoomForm, setShowRoomForm] = useState(false);
   const [roomFormMode, setRoomFormMode] = useState<"create" | "join">("create");
   const [unreadBrowserCount, setUnreadBrowserCount] = useState(0);
+  const { toasts, pushToast, dismiss: dismissToast } = useToasts();
+  useFaviconBadge(unreadBrowserCount);
 
   const handleNewIncomingMessage = useCallback(() => {
     if (document.hidden || !document.hasFocus()) {
@@ -44,8 +49,8 @@ export default function Home() {
     }
   }, []);
 
-  const { onlineUsers, setOnlineUsers, chatPartner, setChatPartner, handleStartChat, isAdmin, unreadCounts } = useContacts(socket, chatPartnerRef, myUserId, handleNewIncomingMessage);
-  const { room, setRoom, isGhost, currentView, setCurrentView, showAdminPanel, setShowAdminPanel, handleRoomJoined, handleRoomExited, handleAdminJoinRoom } = useRoom(socket, showModal, handleNewIncomingMessage);
+  const { onlineUsers, setOnlineUsers, chatPartner, setChatPartner, handleStartChat, isAdmin, unreadCounts } = useContacts(socket, chatPartnerRef, myUserId, handleNewIncomingMessage, pushToast);
+  const { room, setRoom, isGhost, currentView, setCurrentView, showAdminPanel, setShowAdminPanel, handleRoomJoined, handleRoomExited, handleAdminJoinRoom } = useRoom(socket, showModal, handleNewIncomingMessage, pushToast);
   const { displayRecentRooms, setRecentRooms, checkActiveRecentRooms, handleJoinRecentRoom } = useRecentRooms(socket, showModal);
 
   useEffect(() => {
@@ -354,6 +359,15 @@ export default function Home() {
         title={modalConfig.title}
         message={modalConfig.message}
         type={modalConfig.type}
+      />
+
+      <ToastStack
+        toasts={toasts}
+        onDismiss={dismissToast}
+        onUserClick={(user) => {
+          handleStartChat(user);
+          setCurrentView("contacts");
+        }}
       />
     </main>
   );

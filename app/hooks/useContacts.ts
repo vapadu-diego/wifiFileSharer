@@ -4,13 +4,14 @@ import { useState, useEffect, useCallback, MutableRefObject } from "react";
 import { Socket } from "socket.io-client";
 import { OnlineUser, PrivateMessage, PrivateFile } from "@/lib/types";
 import { showBrowserNotification } from "@/lib/notifications";
-import { addLocalMessage, addLocalFile } from "@/lib/chatPersistence";
+import { addLocalMessage, addLocalFile, editLocalMessage, deleteLocalMessage } from "@/lib/chatPersistence";
 
 export function useContacts(
   socket: Socket | null,
   chatPartnerRef: MutableRefObject<OnlineUser | null>,
   myUserId: string,
-  onNewMessage?: () => void
+  onNewMessage?: () => void,
+  onToast?: (toast: { icon: string; title: string; body: string; user?: OnlineUser }) => void
 ) {
   const [onlineUsers, setOnlineUsers] = useState<OnlineUser[]>([]);
   const [chatPartner, setChatPartner] = useState<OnlineUser | null>(null);
@@ -75,11 +76,26 @@ export function useContacts(
       // msg.fromId is now a persistentId
       addLocalMessage(myUserId, msg.fromId, msg);
 
-      if (chatPartnerRef.current?.persistentId !== msg.fromId) {
+      const isCurrentPartner = chatPartnerRef.current?.persistentId === msg.fromId;
+      if (!isCurrentPartner) {
         setUnreadCounts((prev) => ({
           ...prev,
           [msg.fromId]: (prev[msg.fromId] || 0) + 1,
         }));
+        onToast?.({
+          icon: "💬",
+          title: msg.fromName,
+          body: msg.content.length > 100 ? msg.content.slice(0, 100) + "…" : msg.content,
+          user: {
+            id: msg.fromId,
+            persistentId: msg.fromId,
+            nickname: msg.fromName,
+            os: "",
+            browser: "",
+            joinedAt: 0,
+            isOnline: true,
+          },
+        });
       }
       showBrowserNotification(
         `💬 ${msg.fromName}`,
@@ -92,16 +108,41 @@ export function useContacts(
       // f.fromId is now a persistentId
       addLocalFile(myUserId, f.fromId, f);
 
-      if (chatPartnerRef.current?.persistentId !== f.fromId) {
+      const isCurrentPartner = chatPartnerRef.current?.persistentId !== f.fromId;
+      if (isCurrentPartner) {
         setUnreadCounts((prev) => ({
           ...prev,
           [f.fromId]: (prev[f.fromId] || 0) + 1,
         }));
+        onToast?.({
+          icon: "📎",
+          title: f.fromName,
+          body: `Envió un archivo: ${f.name}`,
+          user: {
+            id: f.fromId,
+            persistentId: f.fromId,
+            nickname: f.fromName,
+            os: "",
+            browser: "",
+            joinedAt: 0,
+            isOnline: true,
+          },
+        });
       }
       showBrowserNotification(
         `📎 ${f.fromName}`,
         `Envió un archivo: ${f.name}`
       );
+      onNewMessage?.();
+    };
+
+    const handlePrivateMessageEdited = ({ id, fromId, content }: { id: string; fromId: string; content: string }) => {
+      editLocalMessage(myUserId, fromId, id, content);
+      onNewMessage?.();
+    };
+
+    const handlePrivateMessageDeleted = ({ id, fromId }: { id: string; fromId: string }) => {
+      deleteLocalMessage(myUserId, fromId, id);
       onNewMessage?.();
     };
 
@@ -111,6 +152,8 @@ export function useContacts(
     socket.on("user_reconnected", handleUserReconnected);
     socket.on("private_message", handlePrivateMessage);
     socket.on("private_file", handlePrivateFile);
+    socket.on("private_message_edited", handlePrivateMessageEdited);
+    socket.on("private_message_deleted", handlePrivateMessageDeleted);
 
     return () => {
       socket.off("admin_status", handleAdminStatus);
@@ -119,8 +162,10 @@ export function useContacts(
       socket.off("user_reconnected", handleUserReconnected);
       socket.off("private_message", handlePrivateMessage);
       socket.off("private_file", handlePrivateFile);
+      socket.off("private_message_edited", handlePrivateMessageEdited);
+      socket.off("private_message_deleted", handlePrivateMessageDeleted);
     };
-  }, [socket, chatPartnerRef, myUserId, onNewMessage]);
+  }, [socket, chatPartnerRef, myUserId, onNewMessage, onToast]);
 
   const handleStartChat = useCallback((user: OnlineUser) => {
     setChatPartner(user);

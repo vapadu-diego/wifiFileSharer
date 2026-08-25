@@ -1,4 +1,13 @@
 /**
+ * Returns true when the browser exposes the Notification API.
+ * This only happens on secure contexts (https:// or http://localhost),
+ * so on plain HTTP LAN servers this is false.
+ */
+export function areDesktopNotificationsSupported() {
+  return typeof window !== "undefined" && "Notification" in window;
+}
+
+/**
  * Requests browser permission to show HTML5 desktop notifications.
  */
 export function requestNotificationPermission() {

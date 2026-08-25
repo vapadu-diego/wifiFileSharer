@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useLayoutEffect, useCallback, useRef } from "react";
 import { Socket } from "socket.io-client";
 import { Room } from "@/lib/types";
 import FileTab from "./FileTab";
@@ -44,11 +44,55 @@ function copyToClipboard(text: string): Promise<void> {
   }
 }
 
+const PAGE_SIZE = 30;
+
 export default function RoomView({ socket, room, currentUserId, isGhost = false, onRoomExited }: RoomViewProps) {
   const [activeTab, setActiveTab] = useState<"files" | "texts">("texts");
   const [showParticipants, setShowParticipants] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const [deleteModal, setDeleteModal] = useState<{ type: "file" | "text" | "exit" | "last_user_exit"; id?: string; name?: string } | null>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const isAtBottomRef = useRef(true);
+  const enteredTabRef = useRef(false);
+
+  const visibleMessages = room.texts.slice(-visibleCount);
+
+  const handleMessagesScroll = (e: React.UIEvent<HTMLDivElement>) => {
+    const container = e.currentTarget;
+    isAtBottomRef.current = container.scrollHeight - container.scrollTop - container.clientHeight < 50;
+
+    if (container.scrollTop === 0 && visibleCount < room.texts.length) {
+      const oldScrollHeight = container.scrollHeight;
+      setVisibleCount(prev => Math.min(prev + PAGE_SIZE, room.texts.length));
+      requestAnimationFrame(() => {
+        container.scrollTop = container.scrollHeight - oldScrollHeight;
+      });
+    }
+  };
+
+  // Anchor to bottom before first paint when entering the texts tab
+  useLayoutEffect(() => {
+    const container = messagesContainerRef.current;
+    if (container && isAtBottomRef.current && !enteredTabRef.current) {
+      container.scrollTop = container.scrollHeight;
+      enteredTabRef.current = true;
+    }
+  }, [room.texts.length, activeTab]);
+
+  // Smooth-scroll to bottom on incoming messages if user is at the bottom
+  useEffect(() => {
+    if (activeTab !== "texts" || !enteredTabRef.current) return;
+    const container = messagesContainerRef.current;
+    if (container && isAtBottomRef.current && room.texts.length > 0) {
+      container.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
+    }
+  }, [room.texts.length, activeTab]);
+
+  // Entry to the texts tab starts anchored (no scroll animation)
+  useEffect(() => {
+    enteredTabRef.current = false;
+  }, [activeTab]);
 
   // Warn only on tab close (not reload) - using beforeunload which triggers on both
   // The browser will show its native dialog for tab close attempts
@@ -300,8 +344,8 @@ export default function RoomView({ socket, room, currentUserId, isGhost = false,
           {activeTab === "texts" && (
             <div className="animate-fadeIn flex flex-col h-full">
               {/* Messages */}
-              <div className="flex-1 overflow-y-auto flex flex-col gap-3 mb-4" style={{ paddingRight: "4px" }}>
-                {room.texts.map((item) => (
+              <div className="flex-1 overflow-y-auto flex flex-col gap-3 mb-4" style={{ paddingRight: "4px" }} ref={messagesContainerRef} onScroll={handleMessagesScroll}>
+                {visibleMessages.map((item) => (
                   <div
                     key={item.id}
                     className="message-bubble animate-slideUp"

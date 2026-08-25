@@ -84,3 +84,37 @@ export function addLocalFile(myUserId: string, partnerUserId: string, file: Priv
   saveLocalFiles(myUserId, partnerUserId, updated);
   return updated;
 }
+
+/**
+ * Edits a message in local storage and returns the updated list
+ */
+export function editLocalMessage(
+  myUserId: string,
+  partnerUserId: string,
+  messageId: string,
+  newContent: string
+): PrivateMessage[] {
+  const current = getLocalMessages(myUserId, partnerUserId);
+  const updated = current.map((m) => {
+    if (m.id === messageId) {
+      return { ...m, content: newContent, updatedAt: Date.now() };
+    }
+    return m;
+  });
+  saveLocalMessages(myUserId, partnerUserId, updated);
+  return updated;
+}
+
+/**
+ * Deletes a message from local storage and returns the updated list
+ */
+export function deleteLocalMessage(
+  myUserId: string,
+  partnerUserId: string,
+  messageId: string
+): PrivateMessage[] {
+  const current = getLocalMessages(myUserId, partnerUserId);
+  const updated = current.filter((m) => m.id !== messageId);
+  saveLocalMessages(myUserId, partnerUserId, updated);
+  return updated;
+}

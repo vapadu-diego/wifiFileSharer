@@ -130,6 +130,39 @@ export const getConversation = (userId1: string, userId2: string): PrivateMessag
   return privateConversations.get(key) || [];
 };
 
+export const editPrivateMessage = (
+  fromId: string,
+  toId: string,
+  messageId: string,
+  newContent: string
+): PrivateMessage | undefined => {
+  const key = conversationKey(fromId, toId);
+  const messages = privateConversations.get(key);
+  if (!messages) return undefined;
+
+  const msg = messages.find((m) => m.id === messageId);
+  if (msg) {
+    msg.content = newContent;
+    msg.updatedAt = Date.now();
+  }
+  return msg;
+};
+
+export const deletePrivateMessage = (
+  fromId: string,
+  toId: string,
+  messageId: string
+): boolean => {
+  const key = conversationKey(fromId, toId);
+  const messages = privateConversations.get(key);
+  if (!messages) return false;
+
+  const initialLength = messages.length;
+  const filtered = messages.filter((m) => m.id !== messageId);
+  privateConversations.set(key, filtered);
+  return filtered.length < initialLength;
+};
+
 // --- Private files ---
 
 const privateFiles = new Map<string, PrivateFile[]>();
