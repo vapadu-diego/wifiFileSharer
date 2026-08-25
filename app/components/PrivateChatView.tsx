@@ -119,6 +119,7 @@ export default function PrivateChatView({
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const isAtBottomRef = useRef(true);
   const initialLoadDoneRef = useRef(false);
+  const settleTimerRef = useRef<number | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -493,6 +494,15 @@ export default function PrivateChatView({
     }
   };
 
+  // After a smooth scroll finishes, make sure the newest message is fully visible
+  const handleMessagesScrollEnd = (e: React.UIEvent<HTMLDivElement>) => {
+    const container = e.currentTarget;
+    if (isAtBottomRef.current) {
+      const remaining = container.scrollHeight - container.scrollTop - container.clientHeight;
+      if (remaining > 2) container.scrollTop = container.scrollHeight;
+    }
+  };
+
   // Anchor to bottom before first paint during the initial load
   useLayoutEffect(() => {
     if (!isAtBottomRef.current || initialLoadDoneRef.current) return;
@@ -504,6 +514,23 @@ export default function PrivateChatView({
   useEffect(() => {
     if (!isAtBottomRef.current || !initialLoadDoneRef.current) return;
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [entries.length, partner.persistentId]);
+
+  // Self-healing: if content grew while the smooth scroll was animating (or any
+  // late reflow happens), re-anchor to the bottom so the newest message is
+  // always fully visible when the user is at the bottom.
+  useEffect(() => {
+    if (settleTimerRef.current) window.clearTimeout(settleTimerRef.current);
+    settleTimerRef.current = window.setTimeout(() => {
+      const container = messagesContainerRef.current;
+      if (container && isAtBottomRef.current) {
+        const remaining = container.scrollHeight - container.scrollTop - container.clientHeight;
+        if (remaining > 2) container.scrollTop = container.scrollHeight;
+      }
+    }, 800);
+    return () => {
+      if (settleTimerRef.current) window.clearTimeout(settleTimerRef.current);
+    };
   }, [entries.length, partner.persistentId]);
 
   // Track last sync timestamp for incremental resync
@@ -848,6 +875,7 @@ export default function PrivateChatView({
         onDragOver={handleDrag}
         onDrop={handleDrop}
         onScroll={handleMessagesScroll}
+        onScrollEnd={handleMessagesScrollEnd}
         ref={messagesContainerRef}
       >
         {entries.length === 0 ? (

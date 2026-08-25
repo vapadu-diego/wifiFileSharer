@@ -55,6 +55,7 @@ export default function RoomView({ socket, room, currentUserId, isGhost = false,
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const isAtBottomRef = useRef(true);
   const enteredTabRef = useRef(false);
+  const settleTimerRef = useRef<number | null>(null);
 
   const visibleMessages = room.texts.slice(-visibleCount);
 
@@ -71,12 +72,23 @@ export default function RoomView({ socket, room, currentUserId, isGhost = false,
     }
   };
 
+  // After a smooth scroll finishes, make sure the newest message is fully visible
+  const handleMessagesScrollEnd = (e: React.UIEvent<HTMLDivElement>) => {
+    const container = e.currentTarget;
+    if (isAtBottomRef.current) {
+      const remaining = container.scrollHeight - container.scrollTop - container.clientHeight;
+      if (remaining > 2) container.scrollTop = container.scrollHeight;
+    }
+  };
+
   // Anchor to bottom before first paint when entering the texts tab
   useLayoutEffect(() => {
     const container = messagesContainerRef.current;
     if (container && isAtBottomRef.current && !enteredTabRef.current) {
-      container.scrollTop = container.scrollHeight;
-      enteredTabRef.current = true;
+      if (room.texts.length > 0) {
+        container.scrollTop = container.scrollHeight;
+        enteredTabRef.current = true;
+      }
     }
   }, [room.texts.length, activeTab]);
 
@@ -87,6 +99,23 @@ export default function RoomView({ socket, room, currentUserId, isGhost = false,
     if (container && isAtBottomRef.current && room.texts.length > 0) {
       container.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
     }
+  }, [room.texts.length, activeTab]);
+
+  // Self-healing: re-anchor to the bottom if content grew during the smooth
+  // scroll or a late reflow moved the viewport away from the newest message.
+  useEffect(() => {
+    if (activeTab !== "texts") return;
+    if (settleTimerRef.current) window.clearTimeout(settleTimerRef.current);
+    settleTimerRef.current = window.setTimeout(() => {
+      const container = messagesContainerRef.current;
+      if (container && isAtBottomRef.current) {
+        const remaining = container.scrollHeight - container.scrollTop - container.clientHeight;
+        if (remaining > 2) container.scrollTop = container.scrollHeight;
+      }
+    }, 800);
+    return () => {
+      if (settleTimerRef.current) window.clearTimeout(settleTimerRef.current);
+    };
   }, [room.texts.length, activeTab]);
 
   // Entry to the texts tab starts anchored (no scroll animation)
@@ -344,7 +373,7 @@ export default function RoomView({ socket, room, currentUserId, isGhost = false,
           {activeTab === "texts" && (
             <div className="animate-fadeIn flex flex-col h-full">
               {/* Messages */}
-              <div className="flex-1 overflow-y-auto flex flex-col gap-3 mb-4" style={{ paddingRight: "4px" }} ref={messagesContainerRef} onScroll={handleMessagesScroll}>
+              <div className="flex-1 overflow-y-auto flex flex-col gap-3 mb-4" style={{ paddingRight: "4px" }} ref={messagesContainerRef} onScroll={handleMessagesScroll} onScrollEnd={handleMessagesScrollEnd}>
                 {visibleMessages.map((item) => (
                   <div
                     key={item.id}
