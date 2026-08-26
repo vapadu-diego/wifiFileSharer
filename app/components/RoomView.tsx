@@ -35,7 +35,7 @@ function copyToClipboard(text: string): Promise<void> {
     textArea.style.left = "-999999px";
     textArea.style.top = "-999999px";
     document.body.appendChild(textArea);
-    textArea.focus();
+    textArea.focus({ preventScroll: true });
     textArea.select();
     return new Promise((resolve, reject) => {
       document.execCommand("copy") ? resolve() : reject();
@@ -45,6 +45,9 @@ function copyToClipboard(text: string): Promise<void> {
 }
 
 const PAGE_SIZE = 30;
+
+const formatTime = (ts: number) =>
+  new Date(ts).toLocaleTimeString("es", { hour: "2-digit", minute: "2-digit" });
 
 export default function RoomView({ socket, room, currentUserId, isGhost = false, onRoomExited }: RoomViewProps) {
   const [activeTab, setActiveTab] = useState<"files" | "texts">("texts");
@@ -332,16 +335,19 @@ export default function RoomView({ socket, room, currentUserId, isGhost = false,
                         />
                       ) : (
                         <div className="flex items-center justify-center" style={{ height: "60px", opacity: 0.5 }}>
-                          <FileIcon mimeType={file.type} size={40} />
+                          <FileIcon mimeType={file.type} fileName={file.name} size={40} />
                         </div>
                       )}
 
                       <div className="flex items-center gap-2">
-                        {!isImage(file.type) && <FileIcon mimeType={file.type} size={20} />}
+                        {!isImage(file.type) && <FileIcon mimeType={file.type} fileName={file.name} size={20} />}
                         <span className="truncate" style={{ fontWeight: 600, flex: 1, fontSize: "0.9rem" }}>{file.name}</span>
                       </div>
                       <div className="text-muted" style={{ fontSize: "0.75rem" }}>
                         {(file.size / 1024 / 1024).toFixed(2)} MB · {file.senderName}
+                      </div>
+                      <div className="text-muted" style={{ fontSize: "0.65rem", alignSelf: "flex-end" }}>
+                        {formatTime(file.createdAt)}
                       </div>
                       <a
                         href={`/api/download/${file.id}?roomId=${room.id}`}
@@ -442,6 +448,16 @@ export default function RoomView({ socket, room, currentUserId, isGhost = false,
                       </div>
                     </div>
                     <div style={{ fontSize: "0.95rem", lineHeight: 1.5 }}><FormattedMessage content={item.content} /></div>
+                    <div
+                      className="text-muted"
+                      style={{
+                        fontSize: "0.65rem",
+                        marginTop: "4px",
+                        textAlign: "right",
+                      }}
+                    >
+                      {formatTime(item.createdAt)}
+                    </div>
                   </div>
                 ))}
                 {room.texts.length === 0 && (

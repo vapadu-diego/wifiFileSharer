@@ -27,7 +27,7 @@ export default function TextTab({ socket, roomId, senderName }: TextTabProps) {
 
   // Autofocus input when chat tab is opened
   useEffect(() => {
-    inputRef.current?.focus();
+    inputRef.current?.focus({ preventScroll: true });
   }, []);
 
   const sendMessage = () => {
@@ -39,7 +39,7 @@ export default function TextTab({ socket, roomId, senderName }: TextTabProps) {
     socket.emit("send_text", { roomId, content, senderName });
     setText("");
     setShowSuggestions(false);
-    inputRef.current?.focus();
+    inputRef.current?.focus({ preventScroll: true });
   };
 
   const handleSelectOption = (option: typeof FORMAT_OPTIONS[0]) => {
@@ -54,7 +54,7 @@ export default function TextTab({ socket, roomId, senderName }: TextTabProps) {
 
     const newCursorPos = slashInfo.slashIndex + option.cursorOffset;
     setTimeout(() => {
-      textarea.focus();
+      textarea.focus({ preventScroll: true });
       textarea.setSelectionRange(newCursorPos, newCursorPos);
     }, 0);
   };
@@ -140,7 +140,7 @@ export default function TextTab({ socket, roomId, senderName }: TextTabProps) {
       )}
       <textarea
         ref={inputRef}
-        className="input"
+        className="input no-scrollbar"
         style={{
           marginBottom: 0,
           flex: 1,
@@ -160,7 +160,7 @@ export default function TextTab({ socket, roomId, senderName }: TextTabProps) {
       <button
         type="submit"
         className="btn btn-primary"
-        style={{ width: "auto", flexShrink: 0, height: "44px" }}
+        style={{ width: "auto", flexShrink: 0, height: "44px", cursor: !text.trim() ? "default" : undefined }}
         disabled={!text.trim()}
       >
         <svg width="20" height="20" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">

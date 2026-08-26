@@ -187,3 +187,19 @@ export const getPrivateFileById = (fileId: string): PrivateFile | undefined => {
   }
   return undefined;
 };
+
+export const deletePrivateFile = (
+  fromId: string,
+  toId: string,
+  fileId: string
+): PrivateFile | undefined => {
+  const key = conversationKey(fromId, toId);
+  const files = privateFiles.get(key);
+  if (!files) return undefined;
+
+  const index = files.findIndex((f) => f.id === fileId);
+  if (index === -1) return undefined;
+
+  const [removed] = files.splice(index, 1);
+  return removed;
+};

@@ -19,7 +19,7 @@ function copyToClipboard(text: string): Promise<void> {
     textArea.style.left = "-999999px";
     textArea.style.top = "-999999px";
     document.body.appendChild(textArea);
-    textArea.focus();
+    textArea.focus({ preventScroll: true });
     textArea.select();
     return new Promise((resolve, reject) => {
       document.execCommand("copy") ? resolve() : reject();

@@ -5,12 +5,13 @@ import { getFileCategory } from "@/lib/types";
 
 interface FileIconProps {
   mimeType: string;
+  fileName?: string;
   size?: number;
   className?: string;
 }
 
-export default function FileIcon({ mimeType, size = 24, className = "" }: FileIconProps) {
-  const category = getFileCategory(mimeType);
+export default function FileIcon({ mimeType, fileName, size = 24, className = "" }: FileIconProps) {
+  const category = getFileCategory(mimeType, fileName);
 
   const icons: Record<string, React.ReactNode> = {
     image: (

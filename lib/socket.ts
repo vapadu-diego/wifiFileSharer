@@ -1,6 +1,7 @@
 import { Server, Socket } from "socket.io";
+import fs from "fs";
 import { createRoom, joinRoom, joinRoomAsGhost, leaveRoom, addTextToRoom, getRoom, getAllRooms, kickUser, banUserIp, deleteRoom, removeFileFromRoom, removeTextFromRoom, updateUserSocketId, checkRoomsExist } from "./rooms";
-import { addUser, scheduleRemoveUser, cancelRemoveUser, getAllUsers, getPersistentId, getSocketId, addPrivateMessage, getConversation, getPrivateFiles, editPrivateMessage, deletePrivateMessage } from "./presence";
+import { addUser, scheduleRemoveUser, cancelRemoveUser, getAllUsers, getPersistentId, getSocketId, addPrivateMessage, getConversation, getPrivateFiles, editPrivateMessage, deletePrivateMessage, deletePrivateFile } from "./presence";
 import { User, SharedText, RoomSettings } from "./types";
 
 function parseUserAgent(ua: string): { os: string; browser: string } {
@@ -122,6 +123,31 @@ export const setupSocket = (io: Server) => {
       const targetSocketId = getSocketId(toId);
       if (targetSocketId) {
         io.to(targetSocketId).emit("private_message_deleted", {
+          id,
+          fromId: myPersistentId,
+        });
+      }
+      callback({ success: true });
+    });
+
+    // Delete a private file
+    socket.on("delete_private_file", ({ id, toId }, callback) => {
+      const myPersistentId = getPersistentId(socket.id);
+      if (!myPersistentId) {
+        callback({ success: false, error: "Usuario no registrado" });
+        return;
+      }
+      const removed = deletePrivateFile(myPersistentId, toId, id);
+      if (removed && removed.path && fs.existsSync(removed.path)) {
+        try {
+          fs.unlinkSync(removed.path);
+        } catch {
+          // File could not be removed from disk; record is still deleted
+        }
+      }
+      const targetSocketId = getSocketId(toId);
+      if (targetSocketId) {
+        io.to(targetSocketId).emit("private_file_deleted", {
           id,
           fromId: myPersistentId,
         });

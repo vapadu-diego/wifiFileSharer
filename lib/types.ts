@@ -113,7 +113,41 @@ export const FILE_TYPE_ICONS: Record<string, string> = {
   default: "file",
 };
 
-export function getFileCategory(mimeType: string): string {
+// Extension → category mapping (takes precedence over MIME type)
+export const EXTENSION_TO_CATEGORY: Record<string, string> = {
+  // image
+  png: "image", jpg: "image", jpeg: "image", gif: "image", webp: "image",
+  svg: "image", bmp: "image", ico: "image", avif: "image", tiff: "image",
+  // video
+  mp4: "video", mkv: "video", avi: "video", mov: "video", webm: "video",
+  m4v: "video", wmv: "video", flv: "video", mpg: "video", mpeg: "video",
+  // audio
+  mp3: "audio", wav: "audio", ogg: "audio", oga: "audio", m4a: "audio",
+  flac: "audio", aac: "audio", opus: "audio", wma: "audio",
+  // pdf
+  pdf: "pdf",
+  // document
+  doc: "document", docx: "document", odt: "document", txt: "document",
+  rtf: "document", pages: "document", md: "document",
+  // spreadsheet
+  xls: "spreadsheet", xlsx: "spreadsheet", csv: "spreadsheet",
+  ods: "spreadsheet", numbers: "spreadsheet",
+  // archive
+  zip: "archive", rar: "archive", "7z": "archive", tar: "archive",
+  gz: "archive", tgz: "archive", bz2: "archive", xz: "archive", iso: "archive",
+  // code
+  js: "code", jsx: "code", ts: "code", tsx: "code", py: "code",
+  java: "code", c: "code", cpp: "code", cs: "code", rb: "code",
+  go: "code", rs: "code", php: "code", html: "code", css: "code",
+  scss: "code", json: "code", xml: "code", yml: "code", yaml: "code",
+  sh: "code", sql: "code", kt: "code", swift: "code",
+};
+
+export function getFileCategory(mimeType: string, fileName?: string): string {
+  if (fileName) {
+    const ext = fileName.slice(fileName.lastIndexOf(".") + 1).toLowerCase();
+    if (ext && EXTENSION_TO_CATEGORY[ext]) return EXTENSION_TO_CATEGORY[ext];
+  }
   if (mimeType.startsWith("image/")) return "image";
   if (mimeType.startsWith("video/")) return "video";
   if (mimeType.startsWith("audio/")) return "audio";

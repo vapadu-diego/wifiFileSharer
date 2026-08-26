@@ -25,7 +25,8 @@ import {
   saveLocalFiles,
   addLocalFile,
   editLocalMessage,
-  deleteLocalMessage
+  deleteLocalMessage,
+  deleteLocalFile
 } from "@/lib/chatPersistence";
 
 interface PrivateChatViewProps {
@@ -124,10 +125,11 @@ export default function PrivateChatView({
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const contextMenuRef = useRef<HTMLDivElement>(null);
+  const forceScrollToBottomRef = useRef(false);
   const lastSyncTimeRef = useRef(0);
   const pendingQueueRef = useRef<Array<{ tempId: string; content: string; createdAt: number }>>([]);
   const [pendingIds, setPendingIds] = useState<Set<string>>(new Set());
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; messageId: string; content: string } | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; targetType: "message" | "file"; messageId?: string; content?: string; fileId?: string } | null>(null);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState("");
   const [editingOriginalText, setEditingOriginalText] = useState("");
@@ -155,16 +157,32 @@ export default function PrivateChatView({
     setContextMenu({
       x,
       y,
+      targetType: "message",
       messageId: msg.id,
       content: msg.content,
     });
   };
 
+  const handleFileContextMenu = (e: React.MouseEvent, file: PrivateFile) => {
+    if (file.fromId !== currentUserId) return; // Only allow context menu for own files
+    e.preventDefault();
+    const MENU_WIDTH = 130;
+    const MENU_HEIGHT = 45;
+    const x = Math.max(10, Math.min(e.clientX, window.innerWidth - MENU_WIDTH - 10));
+    const y = Math.max(10, Math.min(e.clientY, window.innerHeight - MENU_HEIGHT - 10));
+    setContextMenu({
+      x,
+      y,
+      targetType: "file",
+      fileId: file.id,
+    });
+  };
+
   const startEdit = () => {
-    if (!contextMenu) return;
-    setEditingMessageId(contextMenu.messageId);
-    setEditingText(contextMenu.content);
-    setEditingOriginalText(contextMenu.content);
+    if (!contextMenu || contextMenu.targetType !== "message") return;
+    setEditingMessageId(contextMenu.messageId!);
+    setEditingText(contextMenu.content || "");
+    setEditingOriginalText(contextMenu.content || "");
     setContextMenu(null);
   };
 
@@ -196,13 +214,13 @@ export default function PrivateChatView({
   };
 
   const deleteMsg = () => {
-    if (!contextMenu) return;
+    if (!contextMenu || contextMenu.targetType !== "message") return;
     socket.emit(
       "delete_private_message",
       { id: contextMenu.messageId, toId: partner.persistentId },
       (res: MutationResponse) => {
         if (res.success) {
-          const updated = deleteLocalMessage(myUserId, partner.persistentId, contextMenu.messageId);
+          const updated = deleteLocalMessage(myUserId, partner.persistentId, contextMenu.messageId!);
           setMessages(updated);
           setContextMenu(null);
         }
@@ -210,10 +228,33 @@ export default function PrivateChatView({
     );
   };
 
+  const deleteFile = (fileId: string) => {
+    socket.emit(
+      "delete_private_file",
+      { id: fileId, toId: partner.persistentId },
+      (res: MutationResponse) => {
+        if (res.success) {
+          const updated = deleteLocalFile(myUserId, partner.persistentId, fileId);
+          setFiles(updated);
+        }
+        setContextMenu(null);
+      }
+    );
+  };
+
+
+  // Prevent the document from scrolling while the chat is open
+  useEffect(() => {
+    const previous = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    return () => {
+      document.body.style.overflow = previous;
+    };
+  }, []);
 
   // Autofocus input when chat opens or changes
   useEffect(() => {
-    inputRef.current?.focus();
+    inputRef.current?.focus({ preventScroll: true });
     isAtBottomRef.current = true;
     initialLoadDoneRef.current = false;
     setVisibleCount(PAGE_SIZE);
@@ -450,16 +491,23 @@ export default function PrivateChatView({
         setMessages((prev) => prev.filter((m) => m.id !== id));
       }
     };
+    const fileDeletedHandler = ({ id, fromId }: { id: string; fromId: string }) => {
+      if (fromId === partner.persistentId || fromId === currentUserId) {
+        setFiles((prev) => prev.filter((f) => f.id !== id));
+      }
+    };
 
     socket.on("private_message", msgHandler);
     socket.on("private_file", fileHandler);
     socket.on("private_message_edited", msgEditedHandler);
     socket.on("private_message_deleted", msgDeletedHandler);
+    socket.on("private_file_deleted", fileDeletedHandler);
     return () => {
       socket.off("private_message", msgHandler);
       socket.off("private_file", fileHandler);
       socket.off("private_message_edited", msgEditedHandler);
       socket.off("private_message_deleted", msgDeletedHandler);
+      socket.off("private_file_deleted", fileDeletedHandler);
     };
   }, [socket, partner.persistentId, myUserId, currentUserId]);
 
@@ -512,8 +560,13 @@ export default function PrivateChatView({
 
   // Smooth-scroll to bottom for incoming messages once initial load is done
   useEffect(() => {
-    if (!isAtBottomRef.current || !initialLoadDoneRef.current) return;
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    if (!initialLoadDoneRef.current) return;
+    if (!isAtBottomRef.current && !forceScrollToBottomRef.current) return;
+    forceScrollToBottomRef.current = false;
+    messagesContainerRef.current?.scrollTo({
+      top: messagesContainerRef.current.scrollHeight,
+      behavior: "smooth",
+    });
   }, [entries.length, partner.persistentId]);
 
   // Self-healing: if content grew while the smooth scroll was animating (or any
@@ -532,6 +585,19 @@ export default function PrivateChatView({
       if (settleTimerRef.current) window.clearTimeout(settleTimerRef.current);
     };
   }, [entries.length, partner.persistentId]);
+
+  // Re-anchor when content grows late (images, diagrams, fonts, etc.) while at bottom
+  useEffect(() => {
+    const container = messagesContainerRef.current;
+    if (!container || typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      if (isAtBottomRef.current) {
+        container.scrollTop = container.scrollHeight;
+      }
+    });
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, []);
 
   // Track last sync timestamp for incremental resync
   useEffect(() => {
@@ -614,6 +680,18 @@ export default function PrivateChatView({
     return () => { socket.off("connect", flushQueue); };
   }, [socket, partner.persistentId]);
 
+  // Scroll to the newest message (used when sending a message/file)
+  const scrollToBottom = () => {
+    isAtBottomRef.current = true;
+    requestAnimationFrame(() => {
+      const container = messagesContainerRef.current;
+      container?.scrollTo({
+        top: container.scrollHeight,
+        behavior: "smooth",
+      });
+    });
+  };
+
   // Send text message (with offline queue support)
   const sendMessage = () => {
     if (!text.trim()) return;
@@ -623,7 +701,7 @@ export default function PrivateChatView({
 
     setText("");
     setShowSuggestions(false);
-    inputRef.current?.focus();
+    inputRef.current?.focus({ preventScroll: true });
 
     if (!socket.connected) {
       // Queue for later — show as pending in the UI
@@ -638,6 +716,8 @@ export default function PrivateChatView({
         content,
         createdAt: Date.now(),
       }]);
+      forceScrollToBottomRef.current = true;
+      scrollToBottom();
       return;
     }
 
@@ -648,6 +728,8 @@ export default function PrivateChatView({
         if (res.success && res.message) {
           const updated = addLocalMessage(myUserId, partner.persistentId, res.message);
           setMessages(updated);
+          forceScrollToBottomRef.current = true;
+          scrollToBottom();
         }
       },
     );
@@ -677,6 +759,8 @@ export default function PrivateChatView({
       if (data.success && data.file) {
         const updated = addLocalFile(myUserId, partner.persistentId, data.file);
         setFiles(updated);
+        forceScrollToBottomRef.current = true;
+        scrollToBottom();
       }
     } catch (err: unknown) {
       setUploadError(
@@ -722,7 +806,7 @@ export default function PrivateChatView({
 
     const newCursorPos = slashInfo.slashIndex + option.cursorOffset;
     setTimeout(() => {
-      textarea.focus();
+      textarea.focus({ preventScroll: true });
       textarea.setSelectionRange(newCursorPos, newCursorPos);
     }, 0);
   };
@@ -864,6 +948,7 @@ export default function PrivateChatView({
       <div
         style={{
           flex: 1,
+          minHeight: 0,
           overflowY: "auto",
           padding: "1rem",
           display: "flex",
@@ -898,7 +983,7 @@ export default function PrivateChatView({
               return (
                 <div
                   key={entry.id}
-                  className="message-bubble animate-slideUp"
+                  className="message-bubble animate-fadeIn"
                   onContextMenu={(e) => handleContextMenu(e, msg)}
                   style={{
                     alignSelf: isMine ? "flex-end" : "flex-start",
@@ -984,7 +1069,7 @@ export default function PrivateChatView({
                           fontSize: "0.65rem",
                           marginTop: "4px",
                           marginBottom: -2,
-                          justifyContent: isMine ? "flex-end" : "flex-start",
+                          justifyContent: "flex-end",
                         }}
                       >
                         {isMine ? (
@@ -1030,7 +1115,6 @@ export default function PrivateChatView({
                           </>
                         ) : (
                           <>
-                            <span>{formatTime(msg.createdAt)}</span>
                             <button
                               onClick={(e) => {
                                 e.stopPropagation();
@@ -1061,6 +1145,7 @@ export default function PrivateChatView({
                                 </svg>
                               )}
                             </button>
+                            <span>{formatTime(msg.createdAt)}</span>
                           </>
                         )}
                       </div>
@@ -1074,7 +1159,8 @@ export default function PrivateChatView({
               return (
                 <div
                   key={entry.id}
-                  className="animate-slideUp"
+                  className="animate-fadeIn"
+                  onContextMenu={(e) => handleFileContextMenu(e, file)}
                   style={{
                     alignSelf: isMine ? "flex-end" : "flex-start",
                     maxWidth: "85%",
@@ -1086,11 +1172,7 @@ export default function PrivateChatView({
                       style={{
                         background: "rgba(255,255,255,0.03)",
                         borderRadius: "var(--radius)",
-                        border: "1px solid var(--card-border)",
                         overflow: "hidden",
-                        borderColor: isMine
-                          ? "rgba(168, 85, 247, 0.3)"
-                          : undefined,
                       }}
                     >
                       {/* eslint-disable-next-line @next/next/no-img-element */}
@@ -1173,7 +1255,7 @@ export default function PrivateChatView({
                         gap: "10px",
                       }}
                     >
-                      <FileIcon mimeType={file.type} size={28} />
+                      <FileIcon mimeType={file.type} fileName={file.name} size={28} />
                       <div style={{ flex: 1, minWidth: 0 }}>
                         <div
                           className="truncate"
@@ -1213,7 +1295,7 @@ export default function PrivateChatView({
                     style={{
                       fontSize: "0.65rem",
                       marginTop: "4px",
-                      textAlign: isMine ? "right" : "left",
+                      textAlign: "right",
                     }}
                   >
                     {formatTime(file.createdAt)}
@@ -1338,7 +1420,7 @@ export default function PrivateChatView({
         </button>
         <textarea
           ref={inputRef}
-          className="input"
+          className="input no-scrollbar"
           style={{
             marginBottom: 0,
             flex: 1,
@@ -1365,6 +1447,7 @@ export default function PrivateChatView({
             flexShrink: 0,
             height: "40px",
             padding: "0 16px",
+            cursor: !text.trim() ? "default" : undefined,
           }}
           disabled={!text.trim()}
         >
@@ -1384,7 +1467,7 @@ export default function PrivateChatView({
       {/* Context Menu */}
       {contextMenu && (() => {
         const menuWidth = 130;
-        const menuHeight = 85;
+        const menuHeight = contextMenu.targetType === "message" ? 85 : 45;
         const menuX = typeof window !== "undefined" && contextMenu.x + menuWidth > window.innerWidth
           ? window.innerWidth - menuWidth - 10
           : contextMenu.x;
@@ -1411,33 +1494,38 @@ export default function PrivateChatView({
             }}
             onClick={(e) => e.stopPropagation()} // Prevent click through closing it immediately
           >
+            {contextMenu.targetType === "message" && (
+              <button
+                type="button"
+                onClick={startEdit}
+                style={{
+                  background: "none",
+                  border: "none",
+                  color: "#fff",
+                  padding: "6px 12px",
+                  textAlign: "left",
+                  fontSize: "0.8rem",
+                  cursor: "pointer",
+                  borderRadius: "4px",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "8px",
+                }}
+                className="context-menu-item"
+              >
+                <svg width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                  <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                  <path d="M18.5 2.5a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4z" />
+                </svg>
+                Editar
+              </button>
+            )}
             <button
               type="button"
-              onClick={startEdit}
-              style={{
-                background: "none",
-                border: "none",
-                color: "#fff",
-                padding: "6px 12px",
-                textAlign: "left",
-                fontSize: "0.8rem",
-                cursor: "pointer",
-                borderRadius: "4px",
-                display: "flex",
-                alignItems: "center",
-                gap: "8px",
+              onClick={() => {
+                if (contextMenu.targetType === "message") deleteMsg();
+                else if (contextMenu.fileId) deleteFile(contextMenu.fileId);
               }}
-              className="context-menu-item"
-            >
-              <svg width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
-                <path d="M18.5 2.5a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4z" />
-              </svg>
-              Editar
-            </button>
-            <button
-              type="button"
-              onClick={deleteMsg}
               style={{
                 background: "none",
                 border: "none",

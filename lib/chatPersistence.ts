@@ -118,3 +118,17 @@ export function deleteLocalMessage(
   saveLocalMessages(myUserId, partnerUserId, updated);
   return updated;
 }
+
+/**
+ * Deletes a file from local storage and returns the updated list
+ */
+export function deleteLocalFile(
+  myUserId: string,
+  partnerUserId: string,
+  fileId: string
+): PrivateFile[] {
+  const current = getLocalFiles(myUserId, partnerUserId);
+  const updated = current.filter((f) => f.id !== fileId);
+  saveLocalFiles(myUserId, partnerUserId, updated);
+  return updated;
+}
