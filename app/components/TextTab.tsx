@@ -8,6 +8,7 @@ import {
   handleSuggestionsKeyDown,
   FORMAT_OPTIONS,
 } from "./FormatSuggestions";
+import EmojiPicker, { insertAtCursor } from "./EmojiPicker";
 import { formatJsonContent } from "@/lib/jsonFormat";
 
 interface TextTabProps {
@@ -19,11 +20,13 @@ interface TextTabProps {
 export default function TextTab({ socket, roomId, senderName }: TextTabProps) {
   const [text, setText] = useState("");
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const lastTypingEmitRef = useRef(0);
 
   // Suggestions state
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [slashInfo, setSlashInfo] = useState<{ query: string; slashIndex: number } | null>(null);
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
 
   // Autofocus input when chat tab is opened
   useEffect(() => {
@@ -59,9 +62,22 @@ export default function TextTab({ socket, roomId, senderName }: TextTabProps) {
     }, 0);
   };
 
+  const handleEmojiSelect = (emoji: string) => {
+    if (inputRef.current) {
+      insertAtCursor(inputRef.current, text, setText, emoji);
+    }
+    setShowEmojiPicker(false);
+  };
+
   const handleTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const val = e.target.value;
     setText(val);
+    if (showEmojiPicker) setShowEmojiPicker(false);
+    const now = Date.now();
+    if (val.trim() && socket.connected && now - lastTypingEmitRef.current > 1500) {
+      lastTypingEmitRef.current = now;
+      socket.emit("room_typing", { roomId });
+    }
     const cmd = getCommandQuery(val, e.target.selectionEnd || 0);
     if (cmd) {
       setSlashInfo(cmd);
@@ -138,6 +154,42 @@ export default function TextTab({ socket, roomId, senderName }: TextTabProps) {
           onClose={() => setShowSuggestions(false)}
         />
       )}
+      {showEmojiPicker && (
+        <EmojiPicker
+          onSelect={handleEmojiSelect}
+          onClose={() => setShowEmojiPicker(false)}
+        />
+      )}
+      <button
+        type="button"
+        className="btn btn-ghost"
+        onClick={() => {
+          setShowEmojiPicker((prev) => !prev);
+          setShowSuggestions(false);
+        }}
+        title="Emojis"
+        style={{
+          width: "40px",
+          height: "40px",
+          padding: 0,
+          flexShrink: 0,
+          marginBottom: "2px",
+        }}
+      >
+        <svg
+          width="18"
+          height="18"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          viewBox="0 0 24 24"
+        >
+          <circle cx="12" cy="12" r="10" />
+          <path d="M8 14s1.5 2 4 2 4-2 4-2" />
+          <line x1="9" y1="9" x2="9.01" y2="9" />
+          <line x1="15" y1="9" x2="15.01" y2="9" />
+        </svg>
+      </button>
       <textarea
         ref={inputRef}
         className="input no-scrollbar"

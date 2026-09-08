@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useRef, useEffect, useLayoutEffect, FormEvent, DragEvent } from "react";
+import { useState, useRef, useEffect, useLayoutEffect, useCallback, FormEvent, DragEvent } from "react";
 import { Socket } from "socket.io-client";
 import {
   FormatSuggestionsDropdown,
@@ -16,6 +16,7 @@ import {
 import { generateUUID } from "@/app/hooks/useSession";
 import FileIcon from "./FileIcon";
 import FormattedMessage from "./FormattedMessage";
+import EmojiPicker, { insertAtCursor } from "./EmojiPicker";
 import { formatJsonContent } from "@/lib/jsonFormat";
 import {
   getLocalMessages,
@@ -26,7 +27,8 @@ import {
   addLocalFile,
   editLocalMessage,
   deleteLocalMessage,
-  deleteLocalFile
+  deleteLocalFile,
+  markLocalMessagesRead
 } from "@/lib/chatPersistence";
 
 interface PrivateChatViewProps {
@@ -138,6 +140,50 @@ export default function PrivateChatView({
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [slashInfo, setSlashInfo] = useState<{ query: string; slashIndex: number } | null>(null);
   const [selectedIndex, setSelectedIndex] = useState(0);
+  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+
+  // Scroll-down button / new message highlight / typing / read receipts
+  const [isAtBottom, setIsAtBottom] = useState(true);
+  const [unseenCount, setUnseenCount] = useState(0);
+  const [highlightId, setHighlightId] = useState<string | null>(null);
+  const [partnerTyping, setPartnerTyping] = useState(false);
+  const highlightTimerRef = useRef<number | null>(null);
+  const typingTimerRef = useRef<number | null>(null);
+  const lastTypingEmitRef = useRef(0);
+  const lastReadEmitRef = useRef(0);
+  const userScrollingRef = useRef(false);
+
+  // Tell the partner we've read their messages (throttled)
+  const emitRead = useCallback(() => {
+    if (!socket.connected) return;
+    const now = Date.now();
+    if (now - lastReadEmitRef.current < 500) return;
+    lastReadEmitRef.current = now;
+    socket.emit("private_read", { withUserId: partner.persistentId });
+  }, [socket, partner.persistentId]);
+
+  const flashMessage = useCallback((id: string) => {
+    if (highlightTimerRef.current) window.clearTimeout(highlightTimerRef.current);
+    setHighlightId(id);
+    highlightTimerRef.current = window.setTimeout(() => setHighlightId(null), 1700);
+  }, []);
+
+  // Re-anchor to the very bottom once the initial load settles, so the last
+  // message is never left half-visible when entering the chat.
+  const markInitialLoadDone = useCallback(() => {
+    initialLoadDoneRef.current = true;
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        const container = messagesContainerRef.current;
+        if (container && !userScrollingRef.current) {
+          container.scrollTop = container.scrollHeight;
+          isAtBottomRef.current = true;
+          setIsAtBottom(true);
+          setUnseenCount(0);
+        }
+      });
+    });
+  }, []);
 
   const copyMessage = (id: string, text: string) => {
     copyToClipboard(text).then(() => {
@@ -256,6 +302,10 @@ export default function PrivateChatView({
   useEffect(() => {
     inputRef.current?.focus({ preventScroll: true });
     isAtBottomRef.current = true;
+    setIsAtBottom(true);
+    setUnseenCount(0);
+    setPartnerTyping(false);
+    setHighlightId(null);
     initialLoadDoneRef.current = false;
     setVisibleCount(PAGE_SIZE);
   }, [partner.persistentId]);
@@ -273,12 +323,16 @@ export default function PrivateChatView({
     const handleGlobalKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
         if (showSuggestions || editingMessageId) return;
+        if (showEmojiPicker) {
+          setShowEmojiPicker(false);
+          return;
+        }
         onBack();
       }
     };
     window.addEventListener("keydown", handleGlobalKeyDown);
     return () => window.removeEventListener("keydown", handleGlobalKeyDown);
-  }, [onBack, showSuggestions, editingMessageId]);
+  }, [onBack, showSuggestions, editingMessageId, showEmojiPicker]);
 
   // Close context menu on click anywhere
   useEffect(() => {
@@ -318,8 +372,9 @@ export default function PrivateChatView({
                 saveLocalMessages(myUserId, partner.persistentId, updated);
                 return updated;
               });
+              emitRead();
             }
-            setTimeout(() => { initialLoadDoneRef.current = true; }, 0);
+            setTimeout(() => { markInitialLoadDone(); }, 0);
           }
         );
         socket.emit("get_private_files_since",
@@ -334,7 +389,7 @@ export default function PrivateChatView({
                 return updated;
               });
             }
-            setTimeout(() => { initialLoadDoneRef.current = true; }, 0);
+            setTimeout(() => { markInitialLoadDone(); }, 0);
           }
         );
       } else {
@@ -344,8 +399,9 @@ export default function PrivateChatView({
             if (res.messages) {
               setMessages(res.messages);
               saveLocalMessages(myUserId, partner.persistentId, res.messages);
+              emitRead();
             }
-            setTimeout(() => { initialLoadDoneRef.current = true; }, 0);
+            setTimeout(() => { markInitialLoadDone(); }, 0);
           }
         );
         socket.emit("get_private_files",
@@ -355,7 +411,7 @@ export default function PrivateChatView({
               setFiles(res.files);
               saveLocalFiles(myUserId, partner.persistentId, res.files);
             }
-            setTimeout(() => { initialLoadDoneRef.current = true; }, 0);
+            setTimeout(() => { markInitialLoadDone(); }, 0);
           }
         );
       }
@@ -377,7 +433,7 @@ export default function PrivateChatView({
     return () => {
       socket.off("connect", handleReconnect);
     };
-  }, [socket, partner.persistentId, partner.id, partner.isOnline, myUserId]);
+  }, [socket, partner.persistentId, partner.id, partner.isOnline, myUserId, emitRead, markInitialLoadDone]);
 
   // Listen for P2P sync requests and data
   useEffect(() => {
@@ -426,6 +482,7 @@ export default function PrivateChatView({
           updatedMsgs.sort((a, b) => a.createdAt - b.createdAt);
           saveLocalMessages(myUserId, partner.persistentId, updatedMsgs);
           setMessages(updatedMsgs);
+          emitRead();
         }
       }
 
@@ -452,7 +509,7 @@ export default function PrivateChatView({
       socket.off("private_sync_ping", syncPingHandler);
       socket.off("private_sync_data", syncDataHandler);
     };
-  }, [socket, partner.persistentId, myUserId]);
+  }, [socket, partner.persistentId, myUserId, emitRead]);
 
   // Listen for new messages
   useEffect(() => {
@@ -461,8 +518,16 @@ export default function PrivateChatView({
         (msg.fromId === partner.persistentId && msg.toId === currentUserId) ||
         (msg.fromId === currentUserId && msg.toId === partner.persistentId)
       ) {
+        const isIncoming = msg.fromId === partner.persistentId;
         const updated = addLocalMessage(myUserId, partner.persistentId, msg);
         setMessages(updated);
+        if (isIncoming) {
+          emitRead();
+          flashMessage(msg.id);
+          if (!isAtBottomRef.current) {
+            setUnseenCount((prev) => prev + 1);
+          }
+        }
       }
     };
     const fileHandler = (f: PrivateFile) => {
@@ -496,20 +561,34 @@ export default function PrivateChatView({
         setFiles((prev) => prev.filter((f) => f.id !== id));
       }
     };
+    const typingHandler = ({ fromId }: { fromId: string }) => {
+      if (fromId !== partner.persistentId) return;
+      setPartnerTyping(true);
+      if (typingTimerRef.current) window.clearTimeout(typingTimerRef.current);
+      typingTimerRef.current = window.setTimeout(() => setPartnerTyping(false), 4000);
+    };
+    const readHandler = ({ fromUserId, messageIds }: { fromUserId: string; messageIds: string[] }) => {
+      if (fromUserId !== partner.persistentId) return;
+      setMessages(markLocalMessagesRead(myUserId, partner.persistentId, messageIds));
+    };
 
     socket.on("private_message", msgHandler);
     socket.on("private_file", fileHandler);
     socket.on("private_message_edited", msgEditedHandler);
     socket.on("private_message_deleted", msgDeletedHandler);
     socket.on("private_file_deleted", fileDeletedHandler);
+    socket.on("private_typing", typingHandler);
+    socket.on("private_messages_read", readHandler);
     return () => {
       socket.off("private_message", msgHandler);
       socket.off("private_file", fileHandler);
       socket.off("private_message_edited", msgEditedHandler);
       socket.off("private_message_deleted", msgDeletedHandler);
       socket.off("private_file_deleted", fileDeletedHandler);
+      socket.off("private_typing", typingHandler);
+      socket.off("private_messages_read", readHandler);
     };
-  }, [socket, partner.persistentId, myUserId, currentUserId]);
+  }, [socket, partner.persistentId, myUserId, currentUserId, emitRead, flashMessage]);
 
   // Merge and sort entries
   const entries: ChatEntry[] = [
@@ -531,7 +610,14 @@ export default function PrivateChatView({
 
   const handleMessagesScroll = (e: React.UIEvent<HTMLDivElement>) => {
     const container = e.currentTarget;
-    isAtBottomRef.current = container.scrollHeight - container.scrollTop - container.clientHeight < 50;
+    const atBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 50;
+    // Ignore scroll events caused by programmatic anchors / late content growth
+    // until the user actually scrolls (wheel / touch).
+    if (userScrollingRef.current) {
+      isAtBottomRef.current = atBottom;
+      setIsAtBottom(atBottom);
+      if (atBottom) setUnseenCount(0);
+    }
 
     if (container.scrollTop === 0 && visibleCount < entries.length) {
       const oldScrollHeight = container.scrollHeight;
@@ -548,6 +634,7 @@ export default function PrivateChatView({
     if (isAtBottomRef.current) {
       const remaining = container.scrollHeight - container.scrollTop - container.clientHeight;
       if (remaining > 2) container.scrollTop = container.scrollHeight;
+      if (userScrollingRef.current) setIsAtBottom(remaining <= 2);
     }
   };
 
@@ -568,6 +655,17 @@ export default function PrivateChatView({
       behavior: "smooth",
     });
   }, [entries.length, partner.persistentId]);
+
+  // Scroll to bottom so the "typing" bubble is visible when it appears
+  useEffect(() => {
+    if (!partnerTyping) return;
+    if (!isAtBottomRef.current) return;
+    const container = messagesContainerRef.current;
+    container?.scrollTo({
+      top: container.scrollHeight,
+      behavior: "smooth",
+    });
+  }, [partnerTyping]);
 
   // Self-healing: if content grew while the smooth scroll was animating (or any
   // late reflow happens), re-anchor to the bottom so the newest message is
@@ -620,6 +718,7 @@ export default function PrivateChatView({
                 const newMsgs = res.messages.filter(m => !existingIds.has(m.id));
                 return newMsgs.length > 0 ? [...prev, ...newMsgs] : prev;
               });
+              emitRead();
             }
           }
         );
@@ -648,7 +747,7 @@ export default function PrivateChatView({
     };
     socket.on("connect", handleReconnect);
     return () => { socket.off("connect", handleReconnect); };
-  }, [socket, partner.persistentId]);
+  }, [socket, partner.persistentId, emitRead]);
 
   // Flush offline queue on reconnect
   useEffect(() => {
@@ -683,6 +782,9 @@ export default function PrivateChatView({
   // Scroll to the newest message (used when sending a message/file)
   const scrollToBottom = () => {
     isAtBottomRef.current = true;
+    setIsAtBottom(true);
+    setUnseenCount(0);
+    userScrollingRef.current = false;
     requestAnimationFrame(() => {
       const container = messagesContainerRef.current;
       container?.scrollTo({
@@ -811,9 +913,22 @@ export default function PrivateChatView({
     }, 0);
   };
 
+  const handleEmojiSelect = (emoji: string) => {
+    if (inputRef.current) {
+      insertAtCursor(inputRef.current, text, setText, emoji);
+    }
+    setShowEmojiPicker(false);
+  };
+
   const handleTextChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
     const val = e.target.value;
     setText(val);
+    if (showEmojiPicker) setShowEmojiPicker(false);
+    const now = Date.now();
+    if (val.trim() && socket.connected && now - lastTypingEmitRef.current > 1500) {
+      lastTypingEmitRef.current = now;
+      socket.emit("private_typing", { toId: partner.persistentId });
+    }
     const cmd = getCommandQuery(val, e.target.selectionEnd || 0);
     if (cmd) {
       setSlashInfo(cmd);
@@ -937,7 +1052,16 @@ export default function PrivateChatView({
               background: partner.isOnline === false ? "var(--muted)" : "#22c55e",
               display: "inline-block", flexShrink: 0,
             }} />
-            <span>{partner.isOnline === false ? "Desconectado" : "En línea"}</span>
+            {partnerTyping ? (
+              <span className="flex items-center gap-1" style={{ color: "var(--primary)", fontWeight: 600 }}>
+                escribiendo
+                <span className="typing-dot" style={{ animationDelay: "0s" }} />
+                <span className="typing-dot" style={{ animationDelay: "0.2s" }} />
+                <span className="typing-dot" style={{ animationDelay: "0.4s" }} />
+              </span>
+            ) : (
+              <span>{partner.isOnline === false ? "Desconectado" : "En línea"}</span>
+            )}
             <span>·</span>
             <span>{partner.os} · {partner.browser}</span>
           </div>
@@ -945,6 +1069,15 @@ export default function PrivateChatView({
       </div>
 
       {/* Messages area */}
+      <div
+        style={{
+          position: "relative",
+          flex: 1,
+          minHeight: 0,
+          display: "flex",
+          flexDirection: "column",
+        }}
+      >
       <div
         style={{
           flex: 1,
@@ -961,6 +1094,8 @@ export default function PrivateChatView({
         onDrop={handleDrop}
         onScroll={handleMessagesScroll}
         onScrollEnd={handleMessagesScrollEnd}
+        onWheel={() => { userScrollingRef.current = true; }}
+        onTouchMove={() => { userScrollingRef.current = true; }}
         ref={messagesContainerRef}
       >
         {entries.length === 0 ? (
@@ -983,7 +1118,7 @@ export default function PrivateChatView({
               return (
                 <div
                   key={entry.id}
-                  className="message-bubble animate-fadeIn"
+                  className={`message-bubble animate-fadeIn ${highlightId === msg.id ? "animate-message-flash" : ""}`}
                   onContextMenu={(e) => handleContextMenu(e, msg)}
                   style={{
                     alignSelf: isMine ? "flex-end" : "flex-start",
@@ -1110,6 +1245,20 @@ export default function PrivateChatView({
                               <span className="flex items-center gap-1">
                                 {msg.updatedAt && <span style={{ opacity: 0.6 }}>(editado)</span>}
                                 <span>{formatTime(msg.createdAt)}</span>
+                                {msg.readAt ? (
+                                  <span title="Leído" style={{ color: "var(--primary)", display: "flex", alignItems: "center" }}>
+                                    <svg width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
+                                      <path d="M18 6L7 17l-5-5" />
+                                      <path d="M22 10l-7.5 7.5L13 16" />
+                                    </svg>
+                                  </span>
+                                ) : (
+                                  <span title="Enviado" style={{ display: "flex", alignItems: "center", opacity: 0.6 }}>
+                                    <svg width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
+                                      <path d="M18 6L7 17l-5-5" />
+                                    </svg>
+                                  </span>
+                                )}
                               </span>
                             )}
                           </>
@@ -1305,7 +1454,56 @@ export default function PrivateChatView({
             }
           })
         )}
+        {partnerTyping && (
+          <div
+            className="message-bubble animate-fadeIn"
+            style={{
+              alignSelf: "flex-start",
+              background: "rgba(255,255,255,0.03)",
+              padding: "10px 14px",
+              borderRadius: "var(--radius)",
+              border: "1px solid var(--card-border)",
+              maxWidth: "85%",
+              display: "flex",
+              alignItems: "center",
+              gap: "5px",
+              color: "var(--muted)",
+            }}
+          >
+            <span className="typing-dot" style={{ animationDelay: "0s" }} />
+            <span className="typing-dot" style={{ animationDelay: "0.2s" }} />
+            <span className="typing-dot" style={{ animationDelay: "0.4s" }} />
+          </div>
+        )}
         <div ref={messagesEndRef} />
+      </div>
+      {!isAtBottom && entries.length > 0 && (
+        <button
+          type="button"
+          onClick={scrollToBottom}
+          title="Volver abajo"
+          className="btn btn-primary"
+          style={{
+            position: "absolute",
+            bottom: "12px",
+            right: "12px",
+            zIndex: 5,
+            height: "36px",
+            padding: "0 14px",
+            borderRadius: "999px",
+            fontSize: "0.8rem",
+            boxShadow: "0 6px 18px rgba(0,0,0,0.45)",
+            display: "flex",
+            alignItems: "center",
+            gap: "6px",
+          }}
+        >
+          <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+            <path d="M12 5v14M19 12l-7 7-7-7" />
+          </svg>
+          {unseenCount > 0 ? `${unseenCount} ${unseenCount === 1 ? "nuevo" : "nuevos"}` : ""}
+        </button>
+      )}
       </div>
 
       {/* Upload error */}
@@ -1377,6 +1575,12 @@ export default function PrivateChatView({
             onClose={() => setShowSuggestions(false)}
           />
         )}
+        {showEmojiPicker && (
+          <EmojiPicker
+            onSelect={handleEmojiSelect}
+            onClose={() => setShowEmojiPicker(false)}
+          />
+        )}
         <input
           ref={fileInputRef}
           type="file"
@@ -1417,6 +1621,30 @@ export default function PrivateChatView({
               <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
             </svg>
           )}
+        </button>
+        <button
+          type="button"
+          className="btn btn-ghost"
+          onClick={() => {
+            setShowEmojiPicker((prev) => !prev);
+            setShowSuggestions(false);
+          }}
+          title="Emojis"
+          style={{ width: "40px", height: "40px", padding: 0, flexShrink: 0 }}
+        >
+          <svg
+            width="18"
+            height="18"
+            fill="none"
+            stroke="currentColor"
+            strokeWidth="2"
+            viewBox="0 0 24 24"
+          >
+            <circle cx="12" cy="12" r="10" />
+            <path d="M8 14s1.5 2 4 2 4-2 4-2" />
+            <line x1="9" y1="9" x2="9.01" y2="9" />
+            <line x1="15" y1="9" x2="15.01" y2="9" />
+          </svg>
         </button>
         <textarea
           ref={inputRef}

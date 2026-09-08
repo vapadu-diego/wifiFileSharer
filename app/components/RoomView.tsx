@@ -59,12 +59,27 @@ export default function RoomView({ socket, room, currentUserId, isGhost = false,
   const isAtBottomRef = useRef(true);
   const enteredTabRef = useRef(false);
   const settleTimerRef = useRef<number | null>(null);
+  const [isAtBottom, setIsAtBottom] = useState(true);
+  const [unseenCount, setUnseenCount] = useState(0);
+  const [highlightId, setHighlightId] = useState<string | null>(null);
+  const [typingUsers, setTypingUsers] = useState<Record<string, string>>({});
+  const highlightTimerRef = useRef<number | null>(null);
+  const typingTimerRefs = useRef<Record<string, number>>({});
+  const lastReadEmitRef = useRef(0);
+  const userScrollingRef = useRef(false);
 
   const visibleMessages = room.texts.slice(-visibleCount);
 
   const handleMessagesScroll = (e: React.UIEvent<HTMLDivElement>) => {
     const container = e.currentTarget;
-    isAtBottomRef.current = container.scrollHeight - container.scrollTop - container.clientHeight < 50;
+    const atBottom = container.scrollHeight - container.scrollTop - container.clientHeight < 50;
+    // Ignore scroll events caused by programmatic anchors / late content growth
+    // until the user actually scrolls (wheel / touch).
+    if (userScrollingRef.current) {
+      isAtBottomRef.current = atBottom;
+      setIsAtBottom(atBottom);
+      if (atBottom) setUnseenCount(0);
+    }
 
     if (container.scrollTop === 0 && visibleCount < room.texts.length) {
       const oldScrollHeight = container.scrollHeight;
@@ -81,8 +96,67 @@ export default function RoomView({ socket, room, currentUserId, isGhost = false,
     if (isAtBottomRef.current) {
       const remaining = container.scrollHeight - container.scrollTop - container.clientHeight;
       if (remaining > 2) container.scrollTop = container.scrollHeight;
+      if (userScrollingRef.current) setIsAtBottom(remaining <= 2);
     }
   };
+
+  const scrollToBottom = () => {
+    isAtBottomRef.current = true;
+    setIsAtBottom(true);
+    setUnseenCount(0);
+    userScrollingRef.current = false;
+    const container = messagesContainerRef.current;
+    container?.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
+  };
+
+  // Highlight + count new incoming room messages (live events only)
+  useEffect(() => {
+    const handleRoomText = (text: { id: string; senderId: string }) => {
+      if (text.senderId === currentUserId) return;
+      if (highlightTimerRef.current) window.clearTimeout(highlightTimerRef.current);
+      setHighlightId(text.id);
+      highlightTimerRef.current = window.setTimeout(() => setHighlightId(null), 1700);
+      if (!isAtBottomRef.current) setUnseenCount((prev) => prev + 1);
+    };
+    socket.on("new_text", handleRoomText);
+    return () => {
+      socket.off("new_text", handleRoomText);
+      if (highlightTimerRef.current) window.clearTimeout(highlightTimerRef.current);
+    };
+  }, [socket, currentUserId]);
+
+  // Live typing indicator from other room users
+  useEffect(() => {
+    const handleRoomTyping = ({ userId, nickname }: { userId: string; nickname: string }) => {
+      if (userId === currentUserId) return;
+      setTypingUsers((prev) => ({ ...prev, [userId]: nickname }));
+      const prevTimer = typingTimerRefs.current[userId];
+      if (prevTimer) window.clearTimeout(prevTimer);
+      typingTimerRefs.current[userId] = window.setTimeout(() => {
+        setTypingUsers((prev) => {
+          const next = { ...prev };
+          delete next[userId];
+          return next;
+        });
+        delete typingTimerRefs.current[userId];
+      }, 4000);
+    };
+    socket.on("room_typing", handleRoomTyping);
+    return () => {
+      socket.off("room_typing", handleRoomTyping);
+    };
+  }, [socket, currentUserId]);
+
+  // Tell the server we've read the latest room messages while on the chat tab
+  useEffect(() => {
+    if (activeTab !== "texts" || isGhost) return;
+    const last = room.texts[room.texts.length - 1];
+    if (!last) return;
+    const now = Date.now();
+    if (now - lastReadEmitRef.current < 1000) return;
+    lastReadEmitRef.current = now;
+    socket.emit("room_mark_read", { roomId: room.id, upToMessageId: last.id });
+  }, [room.texts, activeTab, room.id, isGhost, socket]);
 
   // Anchor to bottom before first paint when entering the texts tab
   useLayoutEffect(() => {
@@ -92,6 +166,19 @@ export default function RoomView({ socket, room, currentUserId, isGhost = false,
         container.scrollTop = container.scrollHeight;
         enteredTabRef.current = true;
       }
+      // Re-anchor once the content settles so the last message is never
+      // left half-visible after entering the tab.
+      requestAnimationFrame(() => {
+        requestAnimationFrame(() => {
+          const c = messagesContainerRef.current;
+          if (c && !userScrollingRef.current) {
+            c.scrollTop = c.scrollHeight;
+            isAtBottomRef.current = true;
+            setIsAtBottom(true);
+            setUnseenCount(0);
+          }
+        });
+      });
     }
   }, [room.texts.length, activeTab]);
 
@@ -103,6 +190,14 @@ export default function RoomView({ socket, room, currentUserId, isGhost = false,
       container.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
     }
   }, [room.texts.length, activeTab]);
+
+  // Scroll to bottom so the "typing" bubbles are visible when they appear
+  useEffect(() => {
+    if (Object.keys(typingUsers).length === 0) return;
+    if (!isAtBottomRef.current) return;
+    const container = messagesContainerRef.current;
+    container?.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
+  }, [typingUsers]);
 
   // Self-healing: re-anchor to the bottom if content grew during the smooth
   // scroll or a late reflow moved the viewport away from the newest message.
@@ -238,6 +333,14 @@ export default function RoomView({ socket, room, currentUserId, isGhost = false,
             {isHost && <span className="badge badge-primary">Host</span>}
             {isGhost && <span className="badge badge-secondary">👻 Ghost</span>}
             <span className="badge" style={{ background: "rgba(255,255,255,0.05)", border: "1px solid var(--card-border)" }}>Máx. {maxMB}MB</span>
+            {Object.keys(typingUsers).length > 0 && (
+              <span className="flex items-center gap-1" style={{ color: "var(--primary)", fontSize: "0.75rem", fontWeight: 600 }}>
+                {Object.values(typingUsers).join(", ")} {Object.keys(typingUsers).length === 1 ? "está" : "están"} escribiendo
+                <span className="typing-dot" style={{ animationDelay: "0s" }} />
+                <span className="typing-dot" style={{ animationDelay: "0.2s" }} />
+                <span className="typing-dot" style={{ animationDelay: "0.4s" }} />
+              </span>
+            )}
           </div>
 
           <div className="flex items-center gap-2">
@@ -379,11 +482,12 @@ export default function RoomView({ socket, room, currentUserId, isGhost = false,
           {activeTab === "texts" && (
             <div className="animate-fadeIn flex flex-col h-full">
               {/* Messages */}
-              <div className="flex-1 overflow-y-auto flex flex-col gap-3 mb-4" style={{ paddingRight: "4px" }} ref={messagesContainerRef} onScroll={handleMessagesScroll} onScrollEnd={handleMessagesScrollEnd}>
+              <div style={{ position: "relative", flex: 1, minHeight: 0, display: "flex", flexDirection: "column" }}>
+              <div className="flex-1 overflow-y-auto flex flex-col gap-3 mb-4" style={{ paddingRight: "4px" }} ref={messagesContainerRef} onScroll={handleMessagesScroll} onScrollEnd={handleMessagesScrollEnd} onWheel={() => { userScrollingRef.current = true; }} onTouchMove={() => { userScrollingRef.current = true; }}>
                 {visibleMessages.map((item) => (
                   <div
                     key={item.id}
-                    className="message-bubble animate-slideUp"
+                    className={`message-bubble animate-slideUp ${highlightId === item.id ? "animate-message-flash" : ""}`}
                     style={{
                       alignSelf: item.senderId === currentUserId ? "flex-end" : "flex-start",
                       background: item.senderId === currentUserId ? "rgba(168, 85, 247, 0.15)" : "rgba(255,255,255,0.03)",
@@ -454,9 +558,30 @@ export default function RoomView({ socket, room, currentUserId, isGhost = false,
                         fontSize: "0.65rem",
                         marginTop: "4px",
                         textAlign: "right",
+                        display: "flex",
+                        alignItems: "center",
+                        justifyContent: "flex-end",
+                        gap: "4px",
                       }}
                     >
-                      {formatTime(item.createdAt)}
+                      <span>{formatTime(item.createdAt)}</span>
+                      {item.senderId === currentUserId && (
+                        (item.readBy && item.readBy.length > 0) ? (
+                          <span title="Leído" style={{ color: "var(--primary)", fontWeight: 700, display: "flex", alignItems: "center", gap: "3px" }}>
+                            <svg width="11" height="11" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
+                              <path d="M18 6L7 17l-5-5" />
+                              <path d="M22 10l-7.5 7.5L13 16" />
+                            </svg>
+                            Leído ({item.readBy.length})
+                          </span>
+                        ) : (
+                          <span title="Enviado" style={{ display: "flex", alignItems: "center", opacity: 0.6 }}>
+                            <svg width="11" height="11" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" viewBox="0 0 24 24">
+                              <path d="M18 6L7 17l-5-5" />
+                            </svg>
+                          </span>
+                        )
+                      )}
                     </div>
                   </div>
                 ))}
@@ -470,6 +595,55 @@ export default function RoomView({ socket, room, currentUserId, isGhost = false,
                     <span>No hay mensajes</span>
                   </div>
                 )}
+                {Object.keys(typingUsers).length > 0 && (
+                  <div
+                    className="message-bubble animate-fadeIn"
+                    style={{
+                      alignSelf: "flex-start",
+                      background: "rgba(255,255,255,0.03)",
+                      padding: "10px 14px",
+                      borderRadius: "var(--radius)",
+                      border: "1px solid var(--card-border)",
+                      maxWidth: "85%",
+                      display: "flex",
+                      alignItems: "center",
+                      gap: "5px",
+                      color: "var(--muted)",
+                    }}
+                  >
+                    <span className="typing-dot" style={{ animationDelay: "0s" }} />
+                    <span className="typing-dot" style={{ animationDelay: "0.2s" }} />
+                    <span className="typing-dot" style={{ animationDelay: "0.4s" }} />
+                  </div>
+                )}
+              </div>
+              {!isAtBottom && room.texts.length > 0 && (
+                <button
+                  type="button"
+                  onClick={scrollToBottom}
+                  title="Volver abajo"
+                  className="btn btn-primary"
+                  style={{
+                    position: "absolute",
+                    bottom: "10px",
+                    right: "12px",
+                    zIndex: 5,
+                    height: "36px",
+                    padding: "0 14px",
+                    borderRadius: "999px",
+                    fontSize: "0.8rem",
+                    boxShadow: "0 6px 18px rgba(0,0,0,0.45)",
+                    display: "flex",
+                    alignItems: "center",
+                    gap: "6px",
+                  }}
+                >
+                  <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+                    <path d="M12 5v14M19 12l-7 7-7-7" />
+                  </svg>
+                  {unseenCount > 0 ? `${unseenCount} ${unseenCount === 1 ? "nuevo" : "nuevos"}` : ""}
+                </button>
+              )}
               </div>
 
               {/* Input (not for ghosts) */}

@@ -16,13 +16,15 @@ export function ToastStack({ toasts, onDismiss, onUserClick }: ToastStackProps) 
     <div
       style={{
         position: "fixed",
-        top: "16px",
-        right: "16px",
+        left: "16px",
+        bottom: "16px",
         zIndex: 300,
         display: "flex",
         flexDirection: "column",
         gap: "10px",
         pointerEvents: "auto",
+        maxHeight: "calc(100vh - 32px)",
+        overflowY: "auto",
       }}
     >
       {toasts.map((toast) => (
@@ -42,8 +44,8 @@ export function ToastStack({ toasts, onDismiss, onUserClick }: ToastStackProps) 
             width: "300px",
             maxWidth: "calc(100vw - 32px)",
             padding: "12px 14px",
-            background: "rgba(18, 18, 26, 0.95)",
-            border: "1px solid var(--card-border)",
+            background: "rgba(255, 255, 255, 0.14)",
+            border: "1px solid rgba(255, 255, 255, 0.28)",
             borderRadius: "var(--radius)",
             boxShadow: "0 10px 25px -5px rgba(0, 0, 0, 0.5)",
             backdropFilter: "blur(10px)",

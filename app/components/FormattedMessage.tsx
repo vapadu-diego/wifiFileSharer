@@ -123,6 +123,34 @@ const EMOJI_MAP: Record<string, string> = {
   ":party:": "🎉",
   ":skull:": "💀",
   ":tada:": "🎉",
+  ":lol:": "😂",
+  ":joy:": "😂",
+  ":laugh:": "😆",
+  ":cry:": "😢",
+  ":sad:": "😢",
+  ":sobs:": "😭",
+  ":cool:": "😎",
+  ":smile:": "😊",
+  ":wow:": "😲",
+  ":scream:": "😱",
+  ":thinking:": "🤔",
+  ":ok:": "👌",
+  ":ok_hand:": "✋",
+  ":thumbsup:": "👍",
+  ":thumbsdown:": "👎",
+  ":clap:": "👏",
+  ":eyes:": "👀",
+  ":wave:": "👋",
+  ":pray:": "🙏",
+  ":heart:": "❤️",
+  ":broken_heart:": "💔",
+  ":kiss:": "😘",
+  ":hug:": "🤗",
+  ":star:": "⭐",
+  ":fireworks:": "🎆",
+  ":hundred:": "💯",
+  ":paint:": "🎨",
+  ":x:": "❌",
   ":)": "🙂",
   ":D": "😀",
   ":(": "🙁",
@@ -131,7 +159,9 @@ const EMOJI_MAP: Record<string, string> = {
 
 function replaceEmojis(text: string): string {
   let result = text;
-  for (const [code, unicode] of Object.entries(EMOJI_MAP)) {
+  // Longest codes first so ":heart:" doesn't break ":broken_heart:"
+  const entries = Object.entries(EMOJI_MAP).sort((a, b) => b[0].length - a[0].length);
+  for (const [code, unicode] of entries) {
     const escapedCode = code.replace(/[-\/\\^$*+?.()|[\]{}]/g, "\\$&");
     const regex = new RegExp(escapedCode, "g");
     result = result.replace(regex, unicode);

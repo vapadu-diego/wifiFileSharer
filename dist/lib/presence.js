@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.getPrivateFileById = exports.getPrivateFiles = exports.addPrivateFile = exports.deletePrivateMessage = exports.editPrivateMessage = exports.getConversation = exports.addPrivateMessage = exports.getSocketId = exports.getPersistentId = exports.getUser = exports.getAllUsers = exports.cancelRemoveUser = exports.scheduleRemoveUser = exports.removeUser = exports.addUser = void 0;
+exports.deletePrivateFile = exports.getPrivateFileById = exports.getPrivateFiles = exports.addPrivateFile = exports.deletePrivateMessage = exports.editPrivateMessage = exports.markConversationRead = exports.getConversation = exports.addPrivateMessage = exports.getSocketId = exports.getPersistentId = exports.getUser = exports.getAllUsers = exports.cancelRemoveUser = exports.scheduleRemoveUser = exports.removeUser = exports.addUser = void 0;
 // Maps use persistentId as key (stable across reconnections)
 const onlineUsers = new Map(); // persistentId → OnlineUser
 const socketToPersistent = new Map(); // socketId → persistentId
@@ -117,6 +117,25 @@ const getConversation = (userId1, userId2) => {
     return privateConversations.get(key) || [];
 };
 exports.getConversation = getConversation;
+/**
+ * Marks all messages received by `readerId` (from `otherId`) as read.
+ * Returns the ids of messages that changed.
+ */
+const markConversationRead = (readerId, otherId, readAt = Date.now()) => {
+    const key = conversationKey(readerId, otherId);
+    const messages = privateConversations.get(key);
+    if (!messages)
+        return [];
+    const changedIds = [];
+    for (const msg of messages) {
+        if (msg.toId === readerId && !msg.readAt) {
+            msg.readAt = readAt;
+            changedIds.push(msg.id);
+        }
+    }
+    return changedIds;
+};
+exports.markConversationRead = markConversationRead;
 const editPrivateMessage = (fromId, toId, messageId, newContent) => {
     const key = conversationKey(fromId, toId);
     const messages = privateConversations.get(key);
@@ -165,3 +184,15 @@ const getPrivateFileById = (fileId) => {
     return undefined;
 };
 exports.getPrivateFileById = getPrivateFileById;
+const deletePrivateFile = (fromId, toId, fileId) => {
+    const key = conversationKey(fromId, toId);
+    const files = privateFiles.get(key);
+    if (!files)
+        return undefined;
+    const index = files.findIndex((f) => f.id === fileId);
+    if (index === -1)
+        return undefined;
+    const [removed] = files.splice(index, 1);
+    return removed;
+};
+exports.deletePrivateFile = deletePrivateFile;

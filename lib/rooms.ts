@@ -228,6 +228,30 @@ export const addTextToRoom = (roomId: string, text: SharedText) => {
   }
 };
 
+/**
+ * Marks all messages up to (and including) `upToMessageId` as read by `userId`.
+ * Returns true if any message changed.
+ */
+export const markRoomTextsRead = (roomId: string, userId: string, upToMessageId: string): boolean => {
+  const room = rooms.get(roomId);
+  if (!room) return false;
+
+  const lastIndex = room.texts.findIndex((t) => t.id === upToMessageId);
+  if (lastIndex === -1) return false;
+
+  let changed = false;
+  for (let i = 0; i <= lastIndex; i++) {
+    const text = room.texts[i];
+    if (text.senderId === userId) continue;
+    if (!text.readBy) text.readBy = [];
+    if (!text.readBy.includes(userId)) {
+      text.readBy.push(userId);
+      changed = true;
+    }
+  }
+  return changed;
+};
+
 export const removeFileFromRoom = (roomId: string, fileId: string): boolean => {
   const room = rooms.get(roomId);
   if (!room) return false;

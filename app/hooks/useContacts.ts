@@ -10,7 +10,7 @@ export function useContacts(
   socket: Socket | null,
   chatPartnerRef: MutableRefObject<OnlineUser | null>,
   myUserId: string,
-  onNewMessage?: () => void,
+  onNewMessage?: (info?: { sender?: string; body?: string }) => void,
   onToast?: (toast: { icon: string; title: string; body: string; user?: OnlineUser }) => void
 ) {
   const [onlineUsers, setOnlineUsers] = useState<OnlineUser[]>([]);
@@ -101,7 +101,7 @@ export function useContacts(
         `💬 ${msg.fromName}`,
         msg.content.length > 100 ? msg.content.slice(0, 100) + "…" : msg.content
       );
-      onNewMessage?.();
+      onNewMessage?.({ sender: msg.fromName, body: msg.content });
     };
 
     const handlePrivateFile = (f: PrivateFile) => {
@@ -133,7 +133,7 @@ export function useContacts(
         `📎 ${f.fromName}`,
         `Envió un archivo: ${f.name}`
       );
-      onNewMessage?.();
+      onNewMessage?.({ sender: f.fromName, body: `📎 ${f.name}` });
     };
 
     const handlePrivateMessageEdited = ({ id, fromId, content }: { id: string; fromId: string; content: string }) => {

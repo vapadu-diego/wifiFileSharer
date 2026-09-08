@@ -3,7 +3,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.removeTextFromRoom = exports.removeFileFromRoom = exports.addTextToRoom = exports.addFileToRoom = exports.deleteRoom = exports.banUserIp = exports.kickUser = exports.checkRoomsExist = exports.leaveRoom = exports.updateUserSocketId = exports.transferHost = exports.joinRoomAsGhost = exports.joinRoom = exports.getAllRooms = exports.getRoom = exports.createRoom = void 0;
+exports.removeTextFromRoom = exports.removeFileFromRoom = exports.markRoomTextsRead = exports.addTextToRoom = exports.addFileToRoom = exports.deleteRoom = exports.banUserIp = exports.kickUser = exports.checkRoomsExist = exports.leaveRoom = exports.updateUserSocketId = exports.transferHost = exports.joinRoomAsGhost = exports.joinRoom = exports.getAllRooms = exports.getRoom = exports.createRoom = void 0;
 const types_1 = require("./types");
 const fs_1 = __importDefault(require("fs"));
 // In-memory store
@@ -218,6 +218,32 @@ const addTextToRoom = (roomId, text) => {
     }
 };
 exports.addTextToRoom = addTextToRoom;
+/**
+ * Marks all messages up to (and including) `upToMessageId` as read by `userId`.
+ * Returns true if any message changed.
+ */
+const markRoomTextsRead = (roomId, userId, upToMessageId) => {
+    const room = rooms.get(roomId);
+    if (!room)
+        return false;
+    const lastIndex = room.texts.findIndex((t) => t.id === upToMessageId);
+    if (lastIndex === -1)
+        return false;
+    let changed = false;
+    for (let i = 0; i <= lastIndex; i++) {
+        const text = room.texts[i];
+        if (text.senderId === userId)
+            continue;
+        if (!text.readBy)
+            text.readBy = [];
+        if (!text.readBy.includes(userId)) {
+            text.readBy.push(userId);
+            changed = true;
+        }
+    }
+    return changed;
+};
+exports.markRoomTextsRead = markRoomTextsRead;
 const removeFileFromRoom = (roomId, fileId) => {
     const room = rooms.get(roomId);
     if (!room)

@@ -130,6 +130,29 @@ export const getConversation = (userId1: string, userId2: string): PrivateMessag
   return privateConversations.get(key) || [];
 };
 
+/**
+ * Marks all messages received by `readerId` (from `otherId`) as read.
+ * Returns the ids of messages that changed.
+ */
+export const markConversationRead = (
+  readerId: string,
+  otherId: string,
+  readAt: number = Date.now()
+): string[] => {
+  const key = conversationKey(readerId, otherId);
+  const messages = privateConversations.get(key);
+  if (!messages) return [];
+
+  const changedIds: string[] = [];
+  for (const msg of messages) {
+    if (msg.toId === readerId && !msg.readAt) {
+      msg.readAt = readAt;
+      changedIds.push(msg.id);
+    }
+  }
+  return changedIds;
+};
+
 export const editPrivateMessage = (
   fromId: string,
   toId: string,

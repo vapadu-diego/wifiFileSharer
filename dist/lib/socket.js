@@ -1,6 +1,10 @@
 "use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.setupSocket = void 0;
+const fs_1 = __importDefault(require("fs"));
 const rooms_1 = require("./rooms");
 const presence_1 = require("./presence");
 function parseUserAgent(ua) {
@@ -33,6 +37,7 @@ function isLocalhost(ip) {
     return ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
 }
 const setupSocket = (io) => {
+    const lastTypingTs = new Map();
     io.on("connection", (socket) => {
         const clientIp = socket.handshake.address || "Unknown";
         const userAgent = socket.handshake.headers["user-agent"] || "";
@@ -79,6 +84,61 @@ const setupSocket = (io) => {
             }
             callback({ success: true, message: msg });
         });
+        // Notify the partner that a private message was read
+        socket.on("private_read", ({ withUserId }) => {
+            const myPersistentId = (0, presence_1.getPersistentId)(socket.id);
+            if (!myPersistentId || !withUserId)
+                return;
+            const changedIds = (0, presence_1.markConversationRead)(myPersistentId, withUserId);
+            if (changedIds.length === 0)
+                return;
+            const targetSocketId = (0, presence_1.getSocketId)(withUserId);
+            if (targetSocketId) {
+                io.to(targetSocketId).emit("private_messages_read", {
+                    fromUserId: myPersistentId,
+                    messageIds: changedIds,
+                });
+            }
+        });
+        // Typing indicator for private chats (throttled to avoid spam)
+        socket.on("private_typing", ({ toId }) => {
+            const myPersistentId = (0, presence_1.getPersistentId)(socket.id);
+            if (!myPersistentId || !toId)
+                return;
+            const now = Date.now();
+            const key = `p:${socket.id}:${toId}`;
+            if (now - (lastTypingTs.get(key) || 0) < 1500)
+                return;
+            lastTypingTs.set(key, now);
+            const targetSocketId = (0, presence_1.getSocketId)(toId);
+            if (targetSocketId) {
+                io.to(targetSocketId).emit("private_typing", { fromId: myPersistentId });
+            }
+        });
+        // Typing indicator for rooms (throttled to avoid spam)
+        socket.on("room_typing", ({ roomId }) => {
+            if (!roomId || !socket.rooms.has(roomId))
+                return;
+            const now = Date.now();
+            const key = `r:${socket.id}`;
+            if (now - (lastTypingTs.get(key) || 0) < 1500)
+                return;
+            lastTypingTs.set(key, now);
+            const room = (0, rooms_1.getRoom)(roomId);
+            const nickname = room?.users.find((u) => u.id === socket.id)?.nickname;
+            if (!nickname || nickname.startsWith("👻"))
+                return;
+            socket.to(roomId).emit("room_typing", { userId: socket.id, nickname });
+        });
+        // Mark room messages as read (chat tab is open)
+        socket.on("room_mark_read", ({ roomId, upToMessageId }) => {
+            if (!roomId || !upToMessageId)
+                return;
+            const changed = (0, rooms_1.markRoomTextsRead)(roomId, socket.id, upToMessageId);
+            if (changed) {
+                io.to(roomId).emit("room_updated", (0, rooms_1.getRoom)(roomId));
+            }
+        });
         // Edit a private message
         socket.on("edit_private_message", ({ id, toId, content }, callback) => {
             const myPersistentId = (0, presence_1.getPersistentId)(socket.id);
@@ -120,6 +180,31 @@ const setupSocket = (io) => {
             const targetSocketId = (0, presence_1.getSocketId)(toId);
             if (targetSocketId) {
                 io.to(targetSocketId).emit("private_message_deleted", {
+                    id,
+                    fromId: myPersistentId,
+                });
+            }
+            callback({ success: true });
+        });
+        // Delete a private file
+        socket.on("delete_private_file", ({ id, toId }, callback) => {
+            const myPersistentId = (0, presence_1.getPersistentId)(socket.id);
+            if (!myPersistentId) {
+                callback({ success: false, error: "Usuario no registrado" });
+                return;
+            }
+            const removed = (0, presence_1.deletePrivateFile)(myPersistentId, toId, id);
+            if (removed && removed.path && fs_1.default.existsSync(removed.path)) {
+                try {
+                    fs_1.default.unlinkSync(removed.path);
+                }
+                catch {
+                    // File could not be removed from disk; record is still deleted
+                }
+            }
+            const targetSocketId = (0, presence_1.getSocketId)(toId);
+            if (targetSocketId) {
+                io.to(targetSocketId).emit("private_file_deleted", {
                     id,
                     fromId: myPersistentId,
                 });

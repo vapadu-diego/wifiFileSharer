@@ -15,7 +15,7 @@ interface JoinRoomResponse {
 export function useRoom(
   socket: Socket | null,
   showModal: (title: string, message: string, type: "info" | "warning" | "error") => void,
-  onNewMessage?: () => void,
+  onNewMessage?: (info?: { sender?: string; body?: string }) => void,
   onToast?: (toast: { icon: string; title: string; body: string }) => void
 ) {
   const [room, setRoom] = useState<Room | null>(null);
@@ -74,7 +74,7 @@ export function useRoom(
             body: text.content.length > 100 ? text.content.slice(0, 100) + "…" : text.content,
           });
         }
-        onNewMessage?.();
+        onNewMessage?.({ sender: `${text.senderName} (Sala)`, body: text.content });
       }
     };
 
@@ -92,7 +92,7 @@ export function useRoom(
             body: `Subió un archivo: ${file.name}`,
           });
         }
-        onNewMessage?.();
+        onNewMessage?.({ sender: `${file.senderName} (Sala)`, body: `📎 ${file.name}` });
       }
     };
 

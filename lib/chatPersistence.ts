@@ -106,6 +106,27 @@ export function editLocalMessage(
 }
 
 /**
+ * Marks messages as read in local storage and returns the updated list
+ */
+export function markLocalMessagesRead(
+  myUserId: string,
+  partnerUserId: string,
+  messageIds: string[],
+  readAt: number = Date.now()
+): PrivateMessage[] {
+  const current = getLocalMessages(myUserId, partnerUserId);
+  const ids = new Set(messageIds);
+  const updated = current.map((m) => {
+    if (ids.has(m.id) && !m.readAt) {
+      return { ...m, readAt };
+    }
+    return m;
+  });
+  saveLocalMessages(myUserId, partnerUserId, updated);
+  return updated;
+}
+
+/**
  * Deletes a message from local storage and returns the updated list
  */
 export function deleteLocalMessage(

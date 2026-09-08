@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.FILE_TYPE_ICONS = exports.FILE_SIZE_OPTIONS = exports.DEFAULT_ROOM_SETTINGS = void 0;
+exports.EXTENSION_TO_CATEGORY = exports.FILE_TYPE_ICONS = exports.FILE_SIZE_OPTIONS = exports.DEFAULT_ROOM_SETTINGS = void 0;
 exports.getFileCategory = getFileCategory;
 exports.DEFAULT_ROOM_SETTINGS = {
     maxFileSize: 100 * 1024 * 1024,
@@ -24,7 +24,41 @@ exports.FILE_TYPE_ICONS = {
     code: "code",
     default: "file",
 };
-function getFileCategory(mimeType) {
+// Extension → category mapping (takes precedence over MIME type)
+exports.EXTENSION_TO_CATEGORY = {
+    // image
+    png: "image", jpg: "image", jpeg: "image", gif: "image", webp: "image",
+    svg: "image", bmp: "image", ico: "image", avif: "image", tiff: "image",
+    // video
+    mp4: "video", mkv: "video", avi: "video", mov: "video", webm: "video",
+    m4v: "video", wmv: "video", flv: "video", mpg: "video", mpeg: "video",
+    // audio
+    mp3: "audio", wav: "audio", ogg: "audio", oga: "audio", m4a: "audio",
+    flac: "audio", aac: "audio", opus: "audio", wma: "audio",
+    // pdf
+    pdf: "pdf",
+    // document
+    doc: "document", docx: "document", odt: "document", txt: "document",
+    rtf: "document", pages: "document", md: "document",
+    // spreadsheet
+    xls: "spreadsheet", xlsx: "spreadsheet", csv: "spreadsheet",
+    ods: "spreadsheet", numbers: "spreadsheet",
+    // archive
+    zip: "archive", rar: "archive", "7z": "archive", tar: "archive",
+    gz: "archive", tgz: "archive", bz2: "archive", xz: "archive", iso: "archive",
+    // code
+    js: "code", jsx: "code", ts: "code", tsx: "code", py: "code",
+    java: "code", c: "code", cpp: "code", cs: "code", rb: "code",
+    go: "code", rs: "code", php: "code", html: "code", css: "code",
+    scss: "code", json: "code", xml: "code", yml: "code", yaml: "code",
+    sh: "code", sql: "code", kt: "code", swift: "code",
+};
+function getFileCategory(mimeType, fileName) {
+    if (fileName) {
+        const ext = fileName.slice(fileName.lastIndexOf(".") + 1).toLowerCase();
+        if (ext && exports.EXTENSION_TO_CATEGORY[ext])
+            return exports.EXTENSION_TO_CATEGORY[ext];
+    }
     if (mimeType.startsWith("image/"))
         return "image";
     if (mimeType.startsWith("video/"))

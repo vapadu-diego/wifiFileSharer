@@ -40,12 +40,20 @@ export default function Home() {
   const [showRoomForm, setShowRoomForm] = useState(false);
   const [roomFormMode, setRoomFormMode] = useState<"create" | "join">("create");
   const [unreadBrowserCount, setUnreadBrowserCount] = useState(0);
+  const [lastIncomingInfo, setLastIncomingInfo] = useState<{ sender: string; body: string } | null>(null);
   const { toasts, pushToast, dismiss: dismissToast } = useToasts();
   useFaviconBadge(unreadBrowserCount);
 
-  const handleNewIncomingMessage = useCallback(() => {
+  const handleNewIncomingMessage = useCallback((info?: { sender?: string; body?: string }) => {
     if (document.hidden || !document.hasFocus()) {
       setUnreadBrowserCount((prev) => prev + 1);
+      if (info?.sender) {
+        const body = (info.body || "").replace(/\s+/g, " ").trim();
+        setLastIncomingInfo({
+          sender: info.sender,
+          body: body.length > 30 ? body.slice(0, 30) + "…" : body,
+        });
+      }
     }
   }, []);
 
@@ -56,6 +64,7 @@ export default function Home() {
   useEffect(() => {
     const handleFocus = () => {
       setUnreadBrowserCount(0);
+      setLastIncomingInfo(null);
     };
     window.addEventListener("focus", handleFocus);
     return () => window.removeEventListener("focus", handleFocus);
@@ -63,11 +72,18 @@ export default function Home() {
 
   useEffect(() => {
     if (unreadBrowserCount > 0) {
-      document.title = `(${unreadBrowserCount}) Wifi File Sharer`;
+      const info = lastIncomingInfo;
+      if (info && info.body) {
+        document.title = `(${unreadBrowserCount}) ${info.sender}: ${info.body} — Wifi File Sharer`;
+      } else if (info) {
+        document.title = `(${unreadBrowserCount}) ${info.sender} — Wifi File Sharer`;
+      } else {
+        document.title = `(${unreadBrowserCount}) Nuevo mensaje — Wifi File Sharer`;
+      }
     } else {
       document.title = "Wifi File Sharer";
     }
-  }, [unreadBrowserCount]);
+  }, [unreadBrowserCount, lastIncomingInfo]);
 
   useEffect(() => {
     chatPartnerRef.current = chatPartner;

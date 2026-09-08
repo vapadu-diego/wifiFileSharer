@@ -27,6 +27,7 @@ export interface SharedText {
   senderId: string;
   senderName: string;
   createdAt: number;
+  readBy?: string[];
 }
 
 export interface RoomSettings {
@@ -74,6 +75,7 @@ export interface PrivateMessage {
   content: string;
   createdAt: number;
   updatedAt?: number;
+  readAt?: number;
 }
 
 export interface PrivateFile {

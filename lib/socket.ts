@@ -1,7 +1,7 @@
 import { Server, Socket } from "socket.io";
 import fs from "fs";
-import { createRoom, joinRoom, joinRoomAsGhost, leaveRoom, addTextToRoom, getRoom, getAllRooms, kickUser, banUserIp, deleteRoom, removeFileFromRoom, removeTextFromRoom, updateUserSocketId, checkRoomsExist } from "./rooms";
-import { addUser, scheduleRemoveUser, cancelRemoveUser, getAllUsers, getPersistentId, getSocketId, addPrivateMessage, getConversation, getPrivateFiles, editPrivateMessage, deletePrivateMessage, deletePrivateFile } from "./presence";
+import { createRoom, joinRoom, joinRoomAsGhost, leaveRoom, addTextToRoom, getRoom, getAllRooms, kickUser, banUserIp, deleteRoom, removeFileFromRoom, removeTextFromRoom, updateUserSocketId, checkRoomsExist, markRoomTextsRead } from "./rooms";
+import { addUser, scheduleRemoveUser, cancelRemoveUser, getAllUsers, getPersistentId, getSocketId, addPrivateMessage, getConversation, getPrivateFiles, editPrivateMessage, deletePrivateMessage, deletePrivateFile, markConversationRead } from "./presence";
 import { User, SharedText, RoomSettings } from "./types";
 
 function parseUserAgent(ua: string): { os: string; browser: string } {
@@ -29,6 +29,8 @@ function isLocalhost(ip: string): boolean {
 }
 
 export const setupSocket = (io: Server) => {
+  const lastTypingTs = new Map<string, number>();
+
   io.on("connection", (socket: Socket) => {
     const clientIp = socket.handshake.address || "Unknown";
     const userAgent = socket.handshake.headers["user-agent"] || "";
@@ -79,6 +81,57 @@ export const setupSocket = (io: Server) => {
         io.to(targetSocketId).emit("private_message", msg);
       }
       callback({ success: true, message: msg });
+    });
+
+    // Notify the partner that a private message was read
+    socket.on("private_read", ({ withUserId }) => {
+      const myPersistentId = getPersistentId(socket.id);
+      if (!myPersistentId || !withUserId) return;
+      const changedIds = markConversationRead(myPersistentId, withUserId);
+      if (changedIds.length === 0) return;
+      const targetSocketId = getSocketId(withUserId);
+      if (targetSocketId) {
+        io.to(targetSocketId).emit("private_messages_read", {
+          fromUserId: myPersistentId,
+          messageIds: changedIds,
+        });
+      }
+    });
+
+    // Typing indicator for private chats (throttled to avoid spam)
+    socket.on("private_typing", ({ toId }) => {
+      const myPersistentId = getPersistentId(socket.id);
+      if (!myPersistentId || !toId) return;
+      const now = Date.now();
+      const key = `p:${socket.id}:${toId}`;
+      if (now - (lastTypingTs.get(key) || 0) < 1500) return;
+      lastTypingTs.set(key, now);
+      const targetSocketId = getSocketId(toId);
+      if (targetSocketId) {
+        io.to(targetSocketId).emit("private_typing", { fromId: myPersistentId });
+      }
+    });
+
+    // Typing indicator for rooms (throttled to avoid spam)
+    socket.on("room_typing", ({ roomId }) => {
+      if (!roomId || !socket.rooms.has(roomId)) return;
+      const now = Date.now();
+      const key = `r:${socket.id}`;
+      if (now - (lastTypingTs.get(key) || 0) < 1500) return;
+      lastTypingTs.set(key, now);
+      const room = getRoom(roomId);
+      const nickname = room?.users.find((u) => u.id === socket.id)?.nickname;
+      if (!nickname || nickname.startsWith("👻")) return;
+      socket.to(roomId).emit("room_typing", { userId: socket.id, nickname });
+    });
+
+    // Mark room messages as read (chat tab is open)
+    socket.on("room_mark_read", ({ roomId, upToMessageId }) => {
+      if (!roomId || !upToMessageId) return;
+      const changed = markRoomTextsRead(roomId, socket.id, upToMessageId);
+      if (changed) {
+        io.to(roomId).emit("room_updated", getRoom(roomId));
+      }
     });
 
     // Edit a private message

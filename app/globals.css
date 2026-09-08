@@ -73,8 +73,31 @@ html, body {
 }
 
 @keyframes toastIn {
-  from { opacity: 0; transform: translateX(24px); }
+  from { opacity: 0; transform: translateX(-24px); }
   to { opacity: 1; transform: translateX(0); }
+}
+
+@keyframes messageFlash {
+  0% { box-shadow: 0 0 0 2px rgba(0, 240, 255, 0.7), 0 0 24px rgba(0, 240, 255, 0.45); }
+  100% { box-shadow: 0 0 0 2px rgba(0, 240, 255, 0), 0 0 24px rgba(0, 240, 255, 0); }
+}
+
+.animate-message-flash {
+  animation: messageFlash 1.6s ease-out;
+}
+
+@keyframes typingDot {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.4; }
+  30% { transform: translateY(-3px); opacity: 1; }
+}
+
+.typing-dot {
+  width: 4px;
+  height: 4px;
+  border-radius: 50%;
+  background: currentColor;
+  display: inline-block;
+  animation: typingDot 1.2s infinite;
 }
 
 .animate-fadeIn { animation: fadeIn 0.3s ease-out; }
