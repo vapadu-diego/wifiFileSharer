@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { Command } from "commander";
 import { startServer } from "../server";
+import pkg from "../package.json";
 
 if (!process.env.NODE_ENV) {
   Object.assign(process.env, { NODE_ENV: "production" });
@@ -11,9 +12,13 @@ const program = new Command();
 program
   .name("wifi-file-sharer")
   .description("Robust file sharing over WiFi with a web UI")
-  .version("1.0.0")
+  .version(pkg.version)
   .option("-p, --port <number>", "Port to run the server on", "3000")
   .option("-h, --host <string>", "Host to bind the server to", "0.0.0.0")
+  .option("--https", "Enable HTTPS (auto self-signed certificate if none provided)")
+  .option("--tls-cert <path>", "Path to a TLS certificate (implies HTTPS)")
+  .option("--tls-key <path>", "Path to a TLS private key (implies HTTPS)")
+  .option("--data-dir <path>", "Directory for the database, uploads and certificates")
   .action((options) => {
     const port = parseInt(options.port, 10);
     const hostname = options.host;
@@ -23,7 +28,14 @@ program
       process.exit(1);
     }
 
-    startServer({ port, hostname }).catch((err) => {
+    startServer({
+      port,
+      hostname,
+      https: options.https === true,
+      tlsCert: options.tlsCert,
+      tlsKey: options.tlsKey,
+      dataDir: options.dataDir,
+    }).catch((err) => {
       console.error("Failed to start server:", err);
       process.exit(1);
     });

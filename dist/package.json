@@ -1,0 +1,67 @@
+{
+    "name": "wifi-file-sharer",
+    "version": "1.1.0",
+    "private": false,
+    "engines": {
+        "node": ">=23.4.0"
+    },
+    "description": "A simple way to share files over WiFi using a robust web interface.",
+    "author": "Isaias Fernandez",
+    "license": "MIT",
+    "keywords": [
+        "wifi",
+        "file-sharing",
+        "lan",
+        "nextjs",
+        "express",
+        "cli"
+    ],
+    "repository": {
+        "type": "git",
+        "url": "https://github.com/isaiasfer/wifiFileSharer"
+    },
+    "bin": {
+        "wifi-file-sharer": "./dist/bin/cli.js"
+    },
+    "files": [
+        "dist",
+        ".next",
+        "public"
+    ],
+    "scripts": {
+        "dev": "nodemon server.ts",
+        "build": "npm run build:next && npm run build:cli",
+        "build:next": "next build",
+        "build:cli": "tsc -p tsconfig.cli.json",
+        "start": "node dist/server.js",
+        "lint": "next lint",
+        "prepublishOnly": "npm run build"
+    },
+    "dependencies": {
+        "commander": "^14.0.2",
+        "express": "^5.2.1",
+        "formidable": "^3.5.4",
+        "mermaid": "^11.17.2",
+        "next": "16.1.1",
+        "open": "^11.0.0",
+        "react": "19.2.3",
+        "react-dom": "19.2.3",
+        "selfsigned": "^5.5.0",
+        "server-only": "^0.0.1",
+        "socket.io": "^4.8.3",
+        "socket.io-client": "^4.8.3"
+    },
+    "devDependencies": {
+        "@types/express": "^5.0.6",
+        "@types/formidable": "^3.4.6",
+        "@types/node": "^24.13.6",
+        "@types/react": "^19",
+        "@types/react-dom": "^19",
+        "cross-env": "^10.1.0",
+        "eslint": "^9",
+        "eslint-config-next": "16.1.1",
+        "nodemon": "^3.1.11",
+        "ts-node": "^10.9.2",
+        "typescript": "^5"
+    }
+}

@@ -133,6 +133,7 @@ export function FormatSuggestionsDropdown({
         bottom: "calc(100% + 8px)",
         left: "10px",
         width: "280px",
+        maxWidth: "calc(100vw - 24px)",
         background: "rgba(18, 18, 26, 0.95)",
         border: "1px solid var(--card-border)",
         borderRadius: "var(--radius)",

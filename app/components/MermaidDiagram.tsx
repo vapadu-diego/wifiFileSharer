@@ -8,7 +8,8 @@ if (typeof window !== "undefined") {
   mermaid.initialize({
     startOnLoad: false,
     theme: "dark",
-    securityLevel: "loose",
+    // User-generated diagrams: keep HTML/script rendering disabled
+    securityLevel: "strict",
     fontFamily: "Inter, sans-serif",
   });
 }

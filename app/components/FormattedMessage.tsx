@@ -530,7 +530,7 @@ function isEnvBlock(str: string): boolean {
 }
 
 function CodeBlock({ code, language }: { code: string; language?: string }) {
-  const highlightedHtml = highlightSyntax(code);
+  const lines = code.split("\n");
   return (
     <div className="code-block">
       <div className="code-block-header">
@@ -538,7 +538,17 @@ function CodeBlock({ code, language }: { code: string; language?: string }) {
         <CopyButton text={code} />
       </div>
       <pre className="code-block-content">
-        <code dangerouslySetInnerHTML={{ __html: highlightedHtml }} />
+        <code>
+          {lines.map((line, i) => (
+            <span key={i} className="code-line" data-line={i + 1}>
+              <span className="code-ln" aria-hidden="true">{i + 1}</span>
+              <span
+                className="code-line-text"
+                dangerouslySetInnerHTML={{ __html: highlightSyntax(line) || "&nbsp;" }}
+              />
+            </span>
+          ))}
+        </code>
       </pre>
     </div>
   );

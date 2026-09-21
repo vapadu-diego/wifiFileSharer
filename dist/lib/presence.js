@@ -1,14 +1,10 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.deletePrivateFile = exports.getPrivateFileById = exports.getPrivateFiles = exports.addPrivateFile = exports.deletePrivateMessage = exports.editPrivateMessage = exports.markConversationRead = exports.getConversation = exports.addPrivateMessage = exports.getSocketId = exports.getPersistentId = exports.getUser = exports.getAllUsers = exports.cancelRemoveUser = exports.scheduleRemoveUser = exports.removeUser = exports.addUser = void 0;
+exports.getSocketId = exports.getPersistentId = exports.getUser = exports.renameUser = exports.getAllUsers = exports.cancelRemoveUser = exports.scheduleRemoveUser = exports.removeUser = exports.addUser = void 0;
 // Maps use persistentId as key (stable across reconnections)
 const onlineUsers = new Map(); // persistentId → OnlineUser
 const socketToPersistent = new Map(); // socketId → persistentId
 const disconnectTimers = new Map(); // persistentId → grace period timer
-const privateConversations = new Map();
-function conversationKey(a, b) {
-    return [a, b].sort().join(":");
-}
 // --- User presence ---
 const addUser = (socketId, persistentId, nickname, os, browser) => {
     const existing = onlineUsers.get(persistentId);
@@ -82,6 +78,17 @@ const getAllUsers = () => {
     return Array.from(onlineUsers.values());
 };
 exports.getAllUsers = getAllUsers;
+/**
+ * Updates the display nickname of an online user.
+ */
+const renameUser = (persistentId, nickname) => {
+    const user = onlineUsers.get(persistentId);
+    if (!user)
+        return undefined;
+    user.nickname = nickname;
+    return user;
+};
+exports.renameUser = renameUser;
 const getUser = (persistentId) => {
     return onlineUsers.get(persistentId);
 };
@@ -94,105 +101,3 @@ const getSocketId = (persistentId) => {
     return onlineUsers.get(persistentId)?.id;
 };
 exports.getSocketId = getSocketId;
-// --- Private messages ---
-const addPrivateMessage = (fromId, toId, fromName, content) => {
-    const msg = {
-        id: Math.random().toString(36).substr(2, 9),
-        fromId,
-        toId,
-        fromName,
-        content,
-        createdAt: Date.now(),
-    };
-    const key = conversationKey(fromId, toId);
-    if (!privateConversations.has(key)) {
-        privateConversations.set(key, []);
-    }
-    privateConversations.get(key).push(msg);
-    return msg;
-};
-exports.addPrivateMessage = addPrivateMessage;
-const getConversation = (userId1, userId2) => {
-    const key = conversationKey(userId1, userId2);
-    return privateConversations.get(key) || [];
-};
-exports.getConversation = getConversation;
-/**
- * Marks all messages received by `readerId` (from `otherId`) as read.
- * Returns the ids of messages that changed.
- */
-const markConversationRead = (readerId, otherId, readAt = Date.now()) => {
-    const key = conversationKey(readerId, otherId);
-    const messages = privateConversations.get(key);
-    if (!messages)
-        return [];
-    const changedIds = [];
-    for (const msg of messages) {
-        if (msg.toId === readerId && !msg.readAt) {
-            msg.readAt = readAt;
-            changedIds.push(msg.id);
-        }
-    }
-    return changedIds;
-};
-exports.markConversationRead = markConversationRead;
-const editPrivateMessage = (fromId, toId, messageId, newContent) => {
-    const key = conversationKey(fromId, toId);
-    const messages = privateConversations.get(key);
-    if (!messages)
-        return undefined;
-    const msg = messages.find((m) => m.id === messageId);
-    if (msg) {
-        msg.content = newContent;
-        msg.updatedAt = Date.now();
-    }
-    return msg;
-};
-exports.editPrivateMessage = editPrivateMessage;
-const deletePrivateMessage = (fromId, toId, messageId) => {
-    const key = conversationKey(fromId, toId);
-    const messages = privateConversations.get(key);
-    if (!messages)
-        return false;
-    const initialLength = messages.length;
-    const filtered = messages.filter((m) => m.id !== messageId);
-    privateConversations.set(key, filtered);
-    return filtered.length < initialLength;
-};
-exports.deletePrivateMessage = deletePrivateMessage;
-// --- Private files ---
-const privateFiles = new Map();
-const addPrivateFile = (file) => {
-    const key = conversationKey(file.fromId, file.toId);
-    if (!privateFiles.has(key)) {
-        privateFiles.set(key, []);
-    }
-    privateFiles.get(key).push(file);
-};
-exports.addPrivateFile = addPrivateFile;
-const getPrivateFiles = (userId1, userId2) => {
-    const key = conversationKey(userId1, userId2);
-    return privateFiles.get(key) || [];
-};
-exports.getPrivateFiles = getPrivateFiles;
-const getPrivateFileById = (fileId) => {
-    for (const files of privateFiles.values()) {
-        const found = files.find((f) => f.id === fileId);
-        if (found)
-            return found;
-    }
-    return undefined;
-};
-exports.getPrivateFileById = getPrivateFileById;
-const deletePrivateFile = (fromId, toId, fileId) => {
-    const key = conversationKey(fromId, toId);
-    const files = privateFiles.get(key);
-    if (!files)
-        return undefined;
-    const index = files.findIndex((f) => f.id === fileId);
-    if (index === -1)
-        return undefined;
-    const [removed] = files.splice(index, 1);
-    return removed;
-};
-exports.deletePrivateFile = deletePrivateFile;

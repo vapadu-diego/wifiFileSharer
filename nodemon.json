@@ -1,0 +1,10 @@
+{
+  "watch": ["server.ts", "lib/**/*.ts", "bin/**/*.ts"],
+  "ignore": [
+    "wifi-sharer-uploads/**",
+    "dist/**",
+    ".next/**",
+    "node_modules/**"
+  ],
+  "ext": "ts,js,json"
+}

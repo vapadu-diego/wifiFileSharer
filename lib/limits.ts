@@ -1,0 +1,10 @@
+export const MAX_CONTENT_LENGTH = 20000;
+export const MAX_NICKNAME_LENGTH = 20;
+export const MAX_ROOM_FILES = 500;
+export const MAX_CONVERSATION_FILES = 500;
+export const MAX_IMPORT_MESSAGES = 500;
+export const PAGE_SIZE_DEFAULT = 50;
+export const PAGE_SIZE_MAX = 100;
+export const RATE_LIMIT_WINDOW_MS = 10_000;
+export const RATE_LIMIT_MAX_EVENTS = 30;
+export const TOMBSTONE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;

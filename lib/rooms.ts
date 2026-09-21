@@ -1,4 +1,6 @@
 import { Room, User, SharedFile, SharedText, RoomSettings, RoomSummary, DEFAULT_ROOM_SETTINGS } from "./types";
+import { getMaxRoomTexts } from "./config";
+import { PAGE_SIZE_DEFAULT, PAGE_SIZE_MAX } from "./limits";
 import fs from "fs";
 
 // In-memory store
@@ -48,6 +50,45 @@ export const getRoom = (roomId: string): Room | undefined => {
   return rooms.get(roomId);
 };
 
+/**
+ * Public (wire) representation of a room. Strips secrets and personal data:
+ * password, banned IPs, ghosts and per-user IP / user-agent.
+ */
+const serializeRoomBase = (room: Room) => ({
+  id: room.id,
+  hostId: room.hostId,
+  users: room.users.map((u) => ({
+    id: u.id,
+    nickname: u.nickname,
+    roomId: u.roomId,
+    os: u.os,
+    browser: u.browser,
+    joinedAt: u.joinedAt,
+    ...(u.isGhost ? { isGhost: true } : {}),
+  })),
+  files: room.files,
+  settings: room.settings,
+  createdAt: room.createdAt,
+});
+
+const SNAPSHOT_TEXTS = 100;
+
+/** Full snapshot (sent when entering a room) with the latest messages */
+export const serializeRoom = (room: Room): Room => ({
+  ...serializeRoomBase(room),
+  texts: room.texts.slice(-SNAPSHOT_TEXTS),
+  textsHasMore: room.texts.length > SNAPSHOT_TEXTS,
+});
+
+/**
+ * Membership/metadata update. Messages travel as deltas (`new_text`,
+ * `text_deleted`, `room_read_updated`) so the whole history is not rebroadcast.
+ */
+export const serializeRoomMeta = (room: Room): Room => ({
+  ...serializeRoomBase(room),
+  texts: [],
+});
+
 // Get all rooms (for admin panel)
 export const getAllRooms = (): RoomSummary[] => {
   const summaries: RoomSummary[] = [];
@@ -69,7 +110,7 @@ export const joinRoom = (roomId: string, user: User, password?: string): { succe
   if (!room) return { success: false, error: "Sala no encontrada" };
 
   // Check if IP is banned
-  if (room.bannedIps.includes(user.ip)) {
+  if (user.ip && (room.bannedIps ?? []).includes(user.ip)) {
     return { success: false, error: "Has sido bloqueado de esta sala" };
   }
 
@@ -96,6 +137,7 @@ export const joinRoomAsGhost = (roomId: string, ghost: User): { success: boolean
   if (!room) return { success: false, error: "Sala no encontrada" };
 
   // Ghosts bypass password check
+  if (!room.ghosts) room.ghosts = [];
   const existingGhost = room.ghosts.find((g) => g.id === ghost.id);
   if (!existingGhost) {
     room.ghosts.push({ ...ghost, isGhost: true });
@@ -113,11 +155,11 @@ export const transferHost = (roomId: string): boolean => {
   return true;
 };
 
-export const updateUserSocketId = (roomId: string, newSocketId: string, nickname: string): { success: boolean; room?: Room; error?: string } => {
+export const updateUserSocketId = (roomId: string, newSocketId: string, persistentId: string): { success: boolean; room?: Room; error?: string } => {
   const room = rooms.get(roomId);
   if (!room) return { success: false, error: "Sala no encontrada" };
 
-  const userIndex = room.users.findIndex((u) => u.nickname === nickname);
+  const userIndex = room.users.findIndex((u) => u.persistentId === persistentId);
   if (userIndex === -1) return { success: false, error: "Usuario no encontrado en la sala" };
 
   const oldSocketId = room.users[userIndex].id;
@@ -138,9 +180,9 @@ export const leaveRoom = (roomId: string, userId: string, keepActive: boolean = 
   if (!room) return undefined;
 
   // Check if it's a ghost leaving
-  const ghostIndex = room.ghosts.findIndex((g) => g.id === userId);
+  const ghostIndex = (room.ghosts ?? []).findIndex((g) => g.id === userId);
   if (ghostIndex !== -1) {
-    room.ghosts.splice(ghostIndex, 1);
+    room.ghosts!.splice(ghostIndex, 1);
     return room;
   }
 
@@ -192,6 +234,7 @@ export const banUserIp = (roomId: string, ip: string): boolean => {
   const room = rooms.get(roomId);
   if (!room) return false;
 
+  if (!room.bannedIps) room.bannedIps = [];
   if (!room.bannedIps.includes(ip)) {
     room.bannedIps.push(ip);
   }
@@ -214,6 +257,25 @@ export const deleteRoom = (roomId: string) => {
   }
 };
 
+/**
+ * Updates the display nickname of a member across every room it belongs to.
+ * Returns the ids of the rooms that changed.
+ */
+export const renameUserInRooms = (persistentId: string, nickname: string): string[] => {
+  const affected: string[] = [];
+  rooms.forEach((room) => {
+    let changed = false;
+    for (const user of room.users) {
+      if (user.persistentId === persistentId && user.nickname !== nickname) {
+        user.nickname = nickname;
+        changed = true;
+      }
+    }
+    if (changed) affected.push(room.id);
+  });
+  return affected;
+};
+
 export const addFileToRoom = (roomId: string, file: SharedFile) => {
   const room = rooms.get(roomId);
   if (room) {
@@ -223,33 +285,73 @@ export const addFileToRoom = (roomId: string, file: SharedFile) => {
 
 export const addTextToRoom = (roomId: string, text: SharedText) => {
   const room = rooms.get(roomId);
-  if (room) {
-    room.texts.push(text);
+  if (!room) return;
+  room.texts.push(text);
+  // Rooms are ephemeral and live in RAM: keep memory bounded by dropping the
+  // oldest messages once the cap is reached.
+  const cap = getMaxRoomTexts();
+  if (room.texts.length > cap) {
+    room.texts.splice(0, room.texts.length - cap);
   }
 };
 
 /**
  * Marks all messages up to (and including) `upToMessageId` as read by `userId`.
- * Returns true if any message changed.
+ * Returns the ids of the messages that changed.
  */
-export const markRoomTextsRead = (roomId: string, userId: string, upToMessageId: string): boolean => {
+export const markRoomTextsRead = (roomId: string, userId: string, upToMessageId: string): string[] => {
   const room = rooms.get(roomId);
-  if (!room) return false;
+  if (!room) return [];
 
   const lastIndex = room.texts.findIndex((t) => t.id === upToMessageId);
-  if (lastIndex === -1) return false;
+  if (lastIndex === -1) return [];
 
-  let changed = false;
+  const changedIds: string[] = [];
   for (let i = 0; i <= lastIndex; i++) {
     const text = room.texts[i];
     if (text.senderId === userId) continue;
     if (!text.readBy) text.readBy = [];
     if (!text.readBy.includes(userId)) {
       text.readBy.push(userId);
-      changed = true;
+      changedIds.push(text.id);
     }
   }
-  return changed;
+  return changedIds;
+};
+
+export interface RoomTextsCursor {
+  createdAt: number;
+  id: string;
+}
+
+/**
+ * Paginated room history (in-memory). Used to fetch messages older than the
+ * snapshot without resending the whole history.
+ */
+export const getRoomTextsPage = (
+  roomId: string,
+  before?: RoomTextsCursor,
+  limit?: number
+): { texts: SharedText[]; hasMore: boolean } => {
+  const room = rooms.get(roomId);
+  if (!room) return { texts: [], hasMore: false };
+
+  const size = !limit || !Number.isFinite(limit)
+    ? PAGE_SIZE_DEFAULT
+    : Math.max(1, Math.min(Math.floor(limit), PAGE_SIZE_MAX));
+
+  const sorted = room.texts;
+  let end = sorted.length;
+  if (before) {
+    end = sorted.findIndex(
+      (t) => t.createdAt > before.createdAt || (t.createdAt === before.createdAt && t.id >= before.id)
+    );
+    // Cursor already trimmed by the memory cap: nothing older is available
+    if (end === -1) return { texts: [], hasMore: false };
+  }
+  const start = Math.max(0, end - size);
+  const texts = sorted.slice(start, end);
+  return { texts, hasMore: start > 0 };
 };
 
 export const removeFileFromRoom = (roomId: string, fileId: string): boolean => {

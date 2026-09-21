@@ -171,7 +171,7 @@ export default function ConnectForm({ socket, defaultMode = "join", onRoomJoined
             placeholder="Ej: Carlos"
             value={nickname}
             onChange={(e) => setNickname(e.target.value)}
-            maxLength={15}
+            maxLength={20}
             autoComplete="off"
           />
         </div>

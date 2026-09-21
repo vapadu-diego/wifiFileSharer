@@ -20,7 +20,8 @@
     "node_modules",
     ".next",
     "app",
-    "lib/chatPersistence.ts",
-    "lib/notifications.ts"
+    "lib/legacyChat.ts",
+    "lib/notifications.ts",
+    "lib/reply.ts"
   ]
 }

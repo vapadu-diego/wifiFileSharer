@@ -19,6 +19,7 @@ import RoomView from "./components/RoomView";
 import AdminPanel from "./components/AdminPanel";
 import Modal from "./components/Modal";
 import ChatLayout from "./components/ChatLayout";
+import EditNicknameModal from "./components/EditNicknameModal";
 import { ToastStack } from "./components/ToastStack";
 
 const RECENT_ROOMS_KEY = "wifi_sharer_recent_rooms";
@@ -35,12 +36,17 @@ function readRecentRooms() {
 export default function Home() {
   const { socket, isReconnecting } = useSocket();
   const { modalConfig, showModal, hideModal } = useModal();
-  const { myNickname, myPersistentId, myUserId, registerUser } = useSession();
+  const { myNickname, myPersistentId, myUserId, registerUser, renameUser } = useSession();
   const chatPartnerRef = useRef<OnlineUser | null>(null);
   const [showRoomForm, setShowRoomForm] = useState(false);
   const [roomFormMode, setRoomFormMode] = useState<"create" | "join">("create");
   const [unreadBrowserCount, setUnreadBrowserCount] = useState(0);
   const [lastIncomingInfo, setLastIncomingInfo] = useState<{ sender: string; body: string } | null>(null);
+  const [identityBlocked, setIdentityBlocked] = useState(false);
+  const [showNicknameModal, setShowNicknameModal] = useState(false);
+  const [nicknameError, setNicknameError] = useState("");
+  const [nicknameSaving, setNicknameSaving] = useState(false);
+  const [nameError, setNameError] = useState("");
   const { toasts, pushToast, dismiss: dismissToast } = useToasts();
   useFaviconBadge(unreadBrowserCount);
 
@@ -57,8 +63,8 @@ export default function Home() {
     }
   }, []);
 
-  const { onlineUsers, setOnlineUsers, chatPartner, setChatPartner, handleStartChat, isAdmin, unreadCounts } = useContacts(socket, chatPartnerRef, myUserId, handleNewIncomingMessage, pushToast);
-  const { room, setRoom, isGhost, currentView, setCurrentView, showAdminPanel, setShowAdminPanel, handleRoomJoined, handleRoomExited, handleAdminJoinRoom } = useRoom(socket, showModal, handleNewIncomingMessage, pushToast);
+  const { onlineUsers, setOnlineUsers, chatPartner, setChatPartner, handleStartChat, isAdmin, unreadCounts, setUnreadCounts } = useContacts(socket, chatPartnerRef, handleNewIncomingMessage, pushToast);
+  const { room, setRoom, isGhost, currentView, setCurrentView, showAdminPanel, setShowAdminPanel, handleRoomJoined, handleRoomExited, handleAdminJoinRoom, hasMoreTexts, loadOlderTexts } = useRoom(socket, showModal, handleNewIncomingMessage, pushToast);
   const { displayRecentRooms, setRecentRooms, checkActiveRecentRooms, handleJoinRecentRoom } = useRecentRooms(socket, showModal);
 
   useEffect(() => {
@@ -69,6 +75,47 @@ export default function Home() {
     window.addEventListener("focus", handleFocus);
     return () => window.removeEventListener("focus", handleFocus);
   }, []);
+
+  // The identity was claimed from another tab/device: this window becomes inactive
+  useEffect(() => {
+    if (!socket) return;
+    const handleIdentityReplaced = () => setIdentityBlocked(true);
+    socket.on("identity_replaced", handleIdentityReplaced);
+    return () => { socket.off("identity_replaced", handleIdentityReplaced); };
+  }, [socket]);
+
+  const handleReclaimIdentity = useCallback(() => {
+    if (!socket) return;
+    const nickname = localStorage.getItem("wifi_sharer_nickname") || myNickname;
+    if (!nickname) return;
+    registerUser(
+      socket,
+      nickname,
+      () => setIdentityBlocked(false),
+      (error) => showModal("Error", error, "error")
+    );
+  }, [socket, myNickname, registerUser, showModal]);
+
+  const handleRenameNickname = useCallback(
+    (nickname: string) => {
+      if (!socket) return;
+      setNicknameSaving(true);
+      setNicknameError("");
+      renameUser(
+        socket,
+        nickname,
+        () => {
+          setNicknameSaving(false);
+          setShowNicknameModal(false);
+        },
+        (error) => {
+          setNicknameSaving(false);
+          setNicknameError(error);
+        }
+      );
+    },
+    [socket, renameUser]
+  );
 
   useEffect(() => {
     if (unreadBrowserCount > 0) {
@@ -100,10 +147,16 @@ export default function Home() {
     const onConnect = () => {
       const savedNickname = localStorage.getItem("wifi_sharer_nickname");
       if (savedNickname) {
-        registerUser(socket, savedNickname, (users) => {
-          setOnlineUsers(users);
-          setCurrentView((prev) => (prev === "name" ? "contacts" : prev));
-        });
+        registerUser(
+          socket,
+          savedNickname,
+          (users, _persistentId, counts) => {
+            setOnlineUsers(users);
+            setUnreadCounts(counts || {});
+            setCurrentView((prev) => (prev === "name" ? "contacts" : prev));
+          },
+          (error) => showModal("No se pudo iniciar sesión", error, "error")
+        );
       }
       checkActiveRecentRooms(socket);
     };
@@ -114,7 +167,7 @@ export default function Home() {
 
     socket.on("connect", onConnect);
     return () => { socket.off("connect", onConnect); };
-  }, [socket, registerUser, checkActiveRecentRooms, setOnlineUsers, setCurrentView]);
+  }, [socket, registerUser, checkActiveRecentRooms, setOnlineUsers, setUnreadCounts, setCurrentView, showModal]);
 
   useEffect(() => {
     if (!socket) return;
@@ -131,18 +184,27 @@ export default function Home() {
     const nickname = (formData.get("nickname") as string || "").trim();
     if (!nickname || !socket) return;
     requestNotificationPermission();
-    registerUser(socket, nickname, (users) => {
-      setOnlineUsers(users);
-      setChatPartner(null);
-      setCurrentView("contacts");
-    });
+    setNameError("");
+    registerUser(
+      socket,
+      nickname,
+      (users, _persistentId, counts) => {
+        setOnlineUsers(users);
+        setUnreadCounts(counts || {});
+        setChatPartner(null);
+        setCurrentView("contacts");
+      },
+      (error) => setNameError(error)
+    );
   };
 
   const handleRoomJoinedWrap = useCallback((roomId: string, password?: string) => {
     handleRoomJoined(roomId, password);
     setRecentRooms(readRecentRooms());
     setShowRoomForm(false);
-  }, [handleRoomJoined, setRecentRooms]);
+    // Room state arrives through room_updated; make the navigation explicit (B8)
+    setCurrentView("room");
+  }, [handleRoomJoined, setRecentRooms, setCurrentView]);
 
   const handleOpenCreateRoom = () => {
     setRoomFormMode("create");
@@ -201,7 +263,7 @@ export default function Home() {
         <div className="flex flex-col gap-6 items-center w-full max-w-lg animate-slideUp relative" style={{ zIndex: 1 }}>
           <div className="text-center">
             <div className="flex flex-col items-center justify-center gap-3 mb-4">
-              <Image src="/icon.png" alt="Wifi File Sharer" width={80} height={80} className="animate-glow rounded-2xl" />
+              <Image src="/logo.png" alt="Wifi File Sharer" width={80} height={80} unoptimized className="animate-glow rounded-2xl" />
               <h1 className="text-gradient" style={{ fontSize: "clamp(1.75rem, 7vw, 3rem)", fontWeight: 700, letterSpacing: "-1px", lineHeight: 1.1 }}>
                 Wifi File Sharer
               </h1>
@@ -224,9 +286,25 @@ export default function Home() {
                 </label>
                 <input
                   className="input" name="nickname" placeholder="Ej: Carlos"
-                  maxLength={15} autoComplete="off" autoFocus
+                  maxLength={20} autoComplete="off" autoFocus
                   defaultValue={localStorage.getItem("wifi_sharer_nickname") || ""}
                 />
+                {nameError && (
+                  <div
+                    className="animate-fadeIn"
+                    style={{
+                      background: "rgba(255, 51, 102, 0.1)",
+                      border: "1px solid var(--accent)",
+                      borderRadius: "var(--radius)",
+                      padding: "10px 12px",
+                      color: "var(--accent)",
+                      fontSize: "0.85rem",
+                      marginTop: "8px",
+                    }}
+                  >
+                    {nameError}
+                  </div>
+                )}
               </div>
               <button type="submit" className="btn btn-primary w-full">
                 <span className="flex items-center gap-2" style={{ justifyContent: "center" }}>
@@ -251,11 +329,16 @@ export default function Home() {
           sidebar={
             <OnlineContactsView
               myNickname={myNickname}
+              myPersistentId={myUserId}
               onlineUsers={onlineUsers}
               unreadCounts={unreadCounts}
               onStartChat={handleStartChat}
               onCreateRoom={handleOpenCreateRoom}
               onJoinRoom={handleOpenJoinRoom}
+              onEditNickname={() => {
+                setNicknameError("");
+                setShowNicknameModal(true);
+              }}
               isAdmin={isAdmin}
               showAdminPanel={showAdminPanel}
               onToggleAdminPanel={() => setShowAdminPanel(!showAdminPanel)}
@@ -324,14 +407,24 @@ export default function Home() {
                 currentUserName={myNickname}
                 myUserId={myUserId}
                 onBack={() => setChatPartner(null)}
+                pushToast={pushToast}
               />
             ) : (
               <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", flexDirection: "column", gap: "1rem" }} className="text-muted">
-                <svg width="64" height="64" fill="none" stroke="currentColor" strokeWidth="1" viewBox="0 0 24 24" style={{ opacity: 0.3 }}>
-                  <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />
-                </svg>
-                <span style={{ fontSize: "1rem" }}>Selecciona un contacto para chatear</span>
-                <span style={{ fontSize: "0.8rem", opacity: 0.7 }}>o crea una sala para compartir archivos</span>
+                <div className="empty-logo-wrap">
+                  <span className="empty-logo-halo" />
+                  <span className="empty-logo-halo empty-logo-halo--outer" />
+                  <Image
+                    src="/logo.png"
+                    alt="Wifi File Sharer"
+                    width={112}
+                    height={112}
+                    unoptimized
+                    className="empty-logo"
+                  />
+                </div>
+                <span className="animate-slideUp" style={{ fontSize: "1rem" }}>Selecciona un contacto para chatear</span>
+                <span className="animate-slideUp" style={{ fontSize: "0.8rem", opacity: 0.7 }}>o crea una sala para compartir archivos</span>
               </div>
             )
           }
@@ -345,6 +438,9 @@ export default function Home() {
           currentUserId={socket.id || ""}
           isGhost={isGhost}
           onRoomExited={handleRoomExited}
+          pushToast={pushToast}
+          hasMoreTexts={hasMoreTexts}
+          onLoadOlderTexts={loadOlderTexts}
         />
       )}
 
@@ -381,10 +477,50 @@ export default function Home() {
         toasts={toasts}
         onDismiss={dismissToast}
         onUserClick={(user) => {
-          handleStartChat(user);
+          // Toasts may carry a stale/fake socket id: resolve the real one (B2)
+          const real = onlineUsers.find((u) => u.persistentId === user.persistentId);
+          handleStartChat(real ?? { ...user, isOnline: false });
           setCurrentView("contacts");
         }}
       />
+
+      {showNicknameModal && (
+        <EditNicknameModal
+          currentName={myNickname}
+          error={nicknameError}
+          saving={nicknameSaving}
+          onClose={() => {
+            if (nicknameSaving) return;
+            setShowNicknameModal(false);
+            setNicknameError("");
+          }}
+          onSave={handleRenameNickname}
+        />
+      )}
+
+      {identityBlocked && (
+        <div
+          style={{
+            position: "fixed", inset: 0,
+            background: "rgba(0,0,0,0.78)", backdropFilter: "blur(4px)",
+            display: "flex", alignItems: "center", justifyContent: "center",
+            zIndex: 400, padding: "1rem",
+          }}
+        >
+          <div className="card animate-slideUp" style={{ maxWidth: "400px", width: "100%", textAlign: "center" }}>
+            <h3 style={{ fontSize: "1.15rem", fontWeight: 700, marginBottom: "0.5rem" }}>
+              Sesión abierta en otro dispositivo
+            </h3>
+            <p className="text-muted" style={{ marginBottom: "1.5rem" }}>
+              Tu identidad se usó en otra pestaña o dispositivo, así que esta ventana quedó inactiva.
+              Puedes retomar la sesión aquí.
+            </p>
+            <button className="btn btn-primary" onClick={handleReclaimIdentity} style={{ minWidth: "160px" }}>
+              Usar esta ventana
+            </button>
+          </div>
+        </div>
+      )}
     </main>
   );
 }

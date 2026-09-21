@@ -3,8 +3,10 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.removeTextFromRoom = exports.removeFileFromRoom = exports.markRoomTextsRead = exports.addTextToRoom = exports.addFileToRoom = exports.deleteRoom = exports.banUserIp = exports.kickUser = exports.checkRoomsExist = exports.leaveRoom = exports.updateUserSocketId = exports.transferHost = exports.joinRoomAsGhost = exports.joinRoom = exports.getAllRooms = exports.getRoom = exports.createRoom = void 0;
+exports.removeTextFromRoom = exports.removeFileFromRoom = exports.getRoomTextsPage = exports.markRoomTextsRead = exports.addTextToRoom = exports.addFileToRoom = exports.renameUserInRooms = exports.deleteRoom = exports.banUserIp = exports.kickUser = exports.checkRoomsExist = exports.leaveRoom = exports.updateUserSocketId = exports.transferHost = exports.joinRoomAsGhost = exports.joinRoom = exports.getAllRooms = exports.serializeRoomMeta = exports.serializeRoom = exports.getRoom = exports.createRoom = void 0;
 const types_1 = require("./types");
+const config_1 = require("./config");
+const limits_1 = require("./limits");
 const fs_1 = __importDefault(require("fs"));
 // In-memory store
 const rooms = new Map();
@@ -49,6 +51,43 @@ const getRoom = (roomId) => {
     return rooms.get(roomId);
 };
 exports.getRoom = getRoom;
+/**
+ * Public (wire) representation of a room. Strips secrets and personal data:
+ * password, banned IPs, ghosts and per-user IP / user-agent.
+ */
+const serializeRoomBase = (room) => ({
+    id: room.id,
+    hostId: room.hostId,
+    users: room.users.map((u) => ({
+        id: u.id,
+        nickname: u.nickname,
+        roomId: u.roomId,
+        os: u.os,
+        browser: u.browser,
+        joinedAt: u.joinedAt,
+        ...(u.isGhost ? { isGhost: true } : {}),
+    })),
+    files: room.files,
+    settings: room.settings,
+    createdAt: room.createdAt,
+});
+const SNAPSHOT_TEXTS = 100;
+/** Full snapshot (sent when entering a room) with the latest messages */
+const serializeRoom = (room) => ({
+    ...serializeRoomBase(room),
+    texts: room.texts.slice(-SNAPSHOT_TEXTS),
+    textsHasMore: room.texts.length > SNAPSHOT_TEXTS,
+});
+exports.serializeRoom = serializeRoom;
+/**
+ * Membership/metadata update. Messages travel as deltas (`new_text`,
+ * `text_deleted`, `room_read_updated`) so the whole history is not rebroadcast.
+ */
+const serializeRoomMeta = (room) => ({
+    ...serializeRoomBase(room),
+    texts: [],
+});
+exports.serializeRoomMeta = serializeRoomMeta;
 // Get all rooms (for admin panel)
 const getAllRooms = () => {
     const summaries = [];
@@ -70,7 +109,7 @@ const joinRoom = (roomId, user, password) => {
     if (!room)
         return { success: false, error: "Sala no encontrada" };
     // Check if IP is banned
-    if (room.bannedIps.includes(user.ip)) {
+    if (user.ip && (room.bannedIps ?? []).includes(user.ip)) {
         return { success: false, error: "Has sido bloqueado de esta sala" };
     }
     if (room.password && room.password !== password) {
@@ -93,6 +132,8 @@ const joinRoomAsGhost = (roomId, ghost) => {
     if (!room)
         return { success: false, error: "Sala no encontrada" };
     // Ghosts bypass password check
+    if (!room.ghosts)
+        room.ghosts = [];
     const existingGhost = room.ghosts.find((g) => g.id === ghost.id);
     if (!existingGhost) {
         room.ghosts.push({ ...ghost, isGhost: true });
@@ -109,11 +150,11 @@ const transferHost = (roomId) => {
     return true;
 };
 exports.transferHost = transferHost;
-const updateUserSocketId = (roomId, newSocketId, nickname) => {
+const updateUserSocketId = (roomId, newSocketId, persistentId) => {
     const room = rooms.get(roomId);
     if (!room)
         return { success: false, error: "Sala no encontrada" };
-    const userIndex = room.users.findIndex((u) => u.nickname === nickname);
+    const userIndex = room.users.findIndex((u) => u.persistentId === persistentId);
     if (userIndex === -1)
         return { success: false, error: "Usuario no encontrado en la sala" };
     const oldSocketId = room.users[userIndex].id;
@@ -131,7 +172,7 @@ const leaveRoom = (roomId, userId, keepActive = false) => {
     if (!room)
         return undefined;
     // Check if it's a ghost leaving
-    const ghostIndex = room.ghosts.findIndex((g) => g.id === userId);
+    const ghostIndex = (room.ghosts ?? []).findIndex((g) => g.id === userId);
     if (ghostIndex !== -1) {
         room.ghosts.splice(ghostIndex, 1);
         return room;
@@ -181,6 +222,8 @@ const banUserIp = (roomId, ip) => {
     const room = rooms.get(roomId);
     if (!room)
         return false;
+    if (!room.bannedIps)
+        room.bannedIps = [];
     if (!room.bannedIps.includes(ip)) {
         room.bannedIps.push(ip);
     }
@@ -204,6 +247,26 @@ const deleteRoom = (roomId) => {
     }
 };
 exports.deleteRoom = deleteRoom;
+/**
+ * Updates the display nickname of a member across every room it belongs to.
+ * Returns the ids of the rooms that changed.
+ */
+const renameUserInRooms = (persistentId, nickname) => {
+    const affected = [];
+    rooms.forEach((room) => {
+        let changed = false;
+        for (const user of room.users) {
+            if (user.persistentId === persistentId && user.nickname !== nickname) {
+                user.nickname = nickname;
+                changed = true;
+            }
+        }
+        if (changed)
+            affected.push(room.id);
+    });
+    return affected;
+};
+exports.renameUserInRooms = renameUserInRooms;
 const addFileToRoom = (roomId, file) => {
     const room = rooms.get(roomId);
     if (room) {
@@ -213,23 +276,29 @@ const addFileToRoom = (roomId, file) => {
 exports.addFileToRoom = addFileToRoom;
 const addTextToRoom = (roomId, text) => {
     const room = rooms.get(roomId);
-    if (room) {
-        room.texts.push(text);
+    if (!room)
+        return;
+    room.texts.push(text);
+    // Rooms are ephemeral and live in RAM: keep memory bounded by dropping the
+    // oldest messages once the cap is reached.
+    const cap = (0, config_1.getMaxRoomTexts)();
+    if (room.texts.length > cap) {
+        room.texts.splice(0, room.texts.length - cap);
     }
 };
 exports.addTextToRoom = addTextToRoom;
 /**
  * Marks all messages up to (and including) `upToMessageId` as read by `userId`.
- * Returns true if any message changed.
+ * Returns the ids of the messages that changed.
  */
 const markRoomTextsRead = (roomId, userId, upToMessageId) => {
     const room = rooms.get(roomId);
     if (!room)
-        return false;
+        return [];
     const lastIndex = room.texts.findIndex((t) => t.id === upToMessageId);
     if (lastIndex === -1)
-        return false;
-    let changed = false;
+        return [];
+    const changedIds = [];
     for (let i = 0; i <= lastIndex; i++) {
         const text = room.texts[i];
         if (text.senderId === userId)
@@ -238,12 +307,36 @@ const markRoomTextsRead = (roomId, userId, upToMessageId) => {
             text.readBy = [];
         if (!text.readBy.includes(userId)) {
             text.readBy.push(userId);
-            changed = true;
+            changedIds.push(text.id);
         }
     }
-    return changed;
+    return changedIds;
 };
 exports.markRoomTextsRead = markRoomTextsRead;
+/**
+ * Paginated room history (in-memory). Used to fetch messages older than the
+ * snapshot without resending the whole history.
+ */
+const getRoomTextsPage = (roomId, before, limit) => {
+    const room = rooms.get(roomId);
+    if (!room)
+        return { texts: [], hasMore: false };
+    const size = !limit || !Number.isFinite(limit)
+        ? limits_1.PAGE_SIZE_DEFAULT
+        : Math.max(1, Math.min(Math.floor(limit), limits_1.PAGE_SIZE_MAX));
+    const sorted = room.texts;
+    let end = sorted.length;
+    if (before) {
+        end = sorted.findIndex((t) => t.createdAt > before.createdAt || (t.createdAt === before.createdAt && t.id >= before.id));
+        // Cursor already trimmed by the memory cap: nothing older is available
+        if (end === -1)
+            return { texts: [], hasMore: false };
+    }
+    const start = Math.max(0, end - size);
+    const texts = sorted.slice(start, end);
+    return { texts, hasMore: start > 0 };
+};
+exports.getRoomTextsPage = getRoomTextsPage;
 const removeFileFromRoom = (roomId, fileId) => {
     const room = rooms.get(roomId);
     if (!room)

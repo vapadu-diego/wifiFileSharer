@@ -17,7 +17,7 @@ export function ToastStack({ toasts, onDismiss, onUserClick }: ToastStackProps) 
       style={{
         position: "fixed",
         left: "16px",
-        bottom: "16px",
+        bottom: "calc(16px + var(--kb-inset, 0px) + env(safe-area-inset-bottom, 0px))",
         zIndex: 300,
         display: "flex",
         flexDirection: "column",
@@ -27,10 +27,12 @@ export function ToastStack({ toasts, onDismiss, onUserClick }: ToastStackProps) 
         overflowY: "auto",
       }}
     >
-      {toasts.map((toast) => (
+      {toasts.map((toast) => {
+        const isLight = toast.variant === "light";
+        return (
         <div
           key={toast.id}
-          className="animate-toast-in"
+          className={`animate-toast-in ${isLight ? "toast-light" : ""}`}
           onClick={() => {
             if (toast.user) {
               onUserClick(toast.user);
@@ -44,12 +46,12 @@ export function ToastStack({ toasts, onDismiss, onUserClick }: ToastStackProps) 
             width: "300px",
             maxWidth: "calc(100vw - 32px)",
             padding: "12px 14px",
-            background: "rgba(255, 255, 255, 0.14)",
-            border: "1px solid rgba(255, 255, 255, 0.28)",
+            background: isLight ? "#ffffff" : "rgba(255, 255, 255, 0.14)",
+            border: isLight ? "1px solid rgba(0, 0, 0, 0.08)" : "1px solid rgba(255, 255, 255, 0.28)",
             borderRadius: "var(--radius)",
-            boxShadow: "0 10px 25px -5px rgba(0, 0, 0, 0.5)",
-            backdropFilter: "blur(10px)",
-            WebkitBackdropFilter: "blur(10px)",
+            boxShadow: isLight ? "0 10px 25px -5px rgba(0, 0, 0, 0.35)" : "0 10px 25px -5px rgba(0, 0, 0, 0.5)",
+            backdropFilter: isLight ? "none" : "blur(10px)",
+            WebkitBackdropFilter: isLight ? "none" : "blur(10px)",
             cursor: toast.user ? "pointer" : "default",
             transition: "border-color 0.2s ease",
           }}
@@ -60,26 +62,28 @@ export function ToastStack({ toasts, onDismiss, onUserClick }: ToastStackProps) 
               style={{
                 fontWeight: 600,
                 fontSize: "0.85rem",
-                color: "var(--primary)",
-                marginBottom: "2px",
+                color: isLight ? "#0f172a" : "var(--primary)",
+                marginBottom: toast.body ? "2px" : 0,
               }}
             >
               {toast.title}
             </div>
-            <div
-              style={{
-                fontSize: "0.8rem",
-                color: "var(--foreground)",
-                lineHeight: 1.4,
-                overflow: "hidden",
-                display: "-webkit-box",
-                WebkitLineClamp: 2,
-                WebkitBoxOrient: "vertical",
-                wordBreak: "break-word",
-              }}
-            >
-              {toast.body}
-            </div>
+            {toast.body && (
+              <div
+                style={{
+                  fontSize: "0.8rem",
+                  color: isLight ? "#334155" : "var(--foreground)",
+                  lineHeight: 1.4,
+                  overflow: "hidden",
+                  display: "-webkit-box",
+                  WebkitLineClamp: 2,
+                  WebkitBoxOrient: "vertical",
+                  wordBreak: "break-word",
+                }}
+              >
+                {toast.body}
+              </div>
+            )}
           </div>
           <button
             type="button"
@@ -90,7 +94,7 @@ export function ToastStack({ toasts, onDismiss, onUserClick }: ToastStackProps) 
             style={{
               background: "none",
               border: "none",
-              color: "var(--muted)",
+              color: isLight ? "rgba(15, 23, 42, 0.45)" : "var(--muted)",
               cursor: "pointer",
               padding: "2px",
               fontSize: "0.85rem",
@@ -102,7 +106,8 @@ export function ToastStack({ toasts, onDismiss, onUserClick }: ToastStackProps) 
             ✕
           </button>
         </div>
-      ))}
+        );
+      })}
     </div>
   );
 }

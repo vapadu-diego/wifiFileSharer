@@ -1,7 +1,40 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.EXTENSION_TO_CATEGORY = exports.FILE_TYPE_ICONS = exports.FILE_SIZE_OPTIONS = exports.DEFAULT_ROOM_SETTINGS = void 0;
+exports.sanitizeReplyRef = sanitizeReplyRef;
 exports.getFileCategory = getFileCategory;
+const REPLY_SNIPPET_MAX = 200;
+const REPLY_EXCERPT_MAX = 400;
+function sanitizeReplyRef(reply) {
+    if (!reply || typeof reply !== "object")
+        return undefined;
+    const r = reply;
+    if (typeof r.id !== "string" || !r.id)
+        return undefined;
+    const snippet = typeof r.snippet === "string" ? r.snippet.slice(0, REPLY_SNIPPET_MAX) : "";
+    const kind = r.kind === "code" ? "code" : "text";
+    const ref = {
+        id: r.id,
+        senderName: typeof r.senderName === "string" ? r.senderName.slice(0, 50) : "",
+        snippet,
+        kind,
+    };
+    if (kind === "code") {
+        if (typeof r.language === "string" && r.language) {
+            ref.language = r.language.slice(0, 30);
+        }
+        const start = typeof r.startLine === "number" && r.startLine > 0 ? Math.floor(r.startLine) : undefined;
+        const end = typeof r.endLine === "number" && r.endLine > 0 ? Math.floor(r.endLine) : undefined;
+        if (start !== undefined) {
+            ref.startLine = start;
+            ref.endLine = end !== undefined && end >= start ? end : start;
+        }
+        if (typeof r.excerpt === "string" && r.excerpt) {
+            ref.excerpt = r.excerpt.slice(0, REPLY_EXCERPT_MAX);
+        }
+    }
+    return ref;
+}
 exports.DEFAULT_ROOM_SETTINGS = {
     maxFileSize: 100 * 1024 * 1024,
 };

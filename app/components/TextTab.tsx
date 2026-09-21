@@ -9,15 +9,19 @@ import {
   FORMAT_OPTIONS,
 } from "./FormatSuggestions";
 import EmojiPicker, { insertAtCursor } from "./EmojiPicker";
+import { ReplyPreview } from "./ReplyQuote";
+import { ReplyRef } from "@/lib/types";
 import { formatJsonContent } from "@/lib/jsonFormat";
 
 interface TextTabProps {
   socket: Socket;
   roomId: string;
   senderName: string;
+  replyTo?: ReplyRef | null;
+  onCancelReply?: () => void;
 }
 
-export default function TextTab({ socket, roomId, senderName }: TextTabProps) {
+export default function TextTab({ socket, roomId, senderName, replyTo, onCancelReply }: TextTabProps) {
   const [text, setText] = useState("");
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const lastTypingEmitRef = useRef(0);
@@ -39,9 +43,10 @@ export default function TextTab({ socket, roomId, senderName }: TextTabProps) {
     let content = text.trim();
     content = formatJsonContent(content);
 
-    socket.emit("send_text", { roomId, content, senderName });
+    socket.emit("send_text", { roomId, content, senderName, replyTo: replyTo ?? undefined });
     setText("");
     setShowSuggestions(false);
+    onCancelReply?.();
     inputRef.current?.focus({ preventScroll: true });
   };
 
@@ -146,6 +151,11 @@ export default function TextTab({ socket, roomId, senderName }: TextTabProps) {
         borderRadius: "var(--radius)",
       }}
     >
+      {replyTo && (
+        <div className="reply-preview-wrap">
+          <ReplyPreview reply={replyTo} onCancel={() => onCancelReply?.()} />
+        </div>
+      )}
       {showSuggestions && slashInfo && (
         <FormatSuggestionsDropdown
           query={slashInfo.query}

@@ -1,6 +1,7 @@
 "use client";
 
 import React from "react";
+import { useKeyboardInset } from "../hooks/useVisualViewportInset";
 
 interface ChatLayoutProps {
   sidebar: React.ReactNode;
@@ -9,8 +10,15 @@ interface ChatLayoutProps {
 }
 
 export default function ChatLayout({ sidebar, main, showMain }: ChatLayoutProps) {
+  useKeyboardInset();
+
   return (
-    <div className="chat-layout">
+    <div
+      className="chat-layout"
+      style={{
+        paddingBottom: "calc(var(--kb-inset, 0px) + env(safe-area-inset-bottom, 0px))",
+      }}
+    >
       <div className={`chat-sidebar ${showMain ? "chat-sidebar-hidden-mobile" : ""}`}>
         {sidebar}
       </div>

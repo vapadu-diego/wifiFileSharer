@@ -17,7 +17,7 @@ interface ParticipantsPanelProps {
 
 export default function ParticipantsPanel({ socket, users, hostId, currentUserId, roomId, isOpen, onClose }: ParticipantsPanelProps) {
   const isHost = currentUserId === hostId;
-  const [confirmModal, setConfirmModal] = useState<{ type: "kick" | "ban"; userId: string; userIp: string; userName: string } | null>(null);
+  const [confirmModal, setConfirmModal] = useState<{ type: "kick" | "ban"; userId: string; userName: string } | null>(null);
 
   const formatTime = (timestamp: number) => {
     return new Date(timestamp).toLocaleTimeString("es", { hour: "2-digit", minute: "2-digit" });
@@ -32,8 +32,9 @@ export default function ParticipantsPanel({ socket, users, hostId, currentUserId
     setConfirmModal(null);
   };
 
-  const handleBan = (userId: string, userIp: string) => {
-    socket.emit("ban_user", { roomId, targetUserId: userId, targetIp: userIp }, () => { });
+  const handleBan = (userId: string) => {
+    // The server resolves the target IP itself from the room state
+    socket.emit("ban_user", { roomId, targetUserId: userId }, () => { });
     setConfirmModal(null);
   };
 
@@ -67,7 +68,7 @@ export default function ParticipantsPanel({ socket, users, hostId, currentUserId
                 {isHost && user.id !== currentUserId && (
                   <div className="text-muted" style={{ fontSize: "0.7rem", marginTop: "4px", lineHeight: 1.4 }}>
                     <div>{user.os} · {user.browser}</div>
-                    <div>{user.ip} · {formatTime(user.joinedAt)}</div>
+                    <div>{formatTime(user.joinedAt)}</div>
                   </div>
                 )}
               </div>
@@ -77,7 +78,7 @@ export default function ParticipantsPanel({ socket, users, hostId, currentUserId
                 <div className="flex gap-1">
                   <button
                     className="btn btn-ghost"
-                    onClick={() => setConfirmModal({ type: "kick", userId: user.id, userIp: user.ip, userName: user.nickname })}
+                    onClick={() => setConfirmModal({ type: "kick", userId: user.id, userName: user.nickname })}
                     title="Expulsar"
                     style={{
                       width: "32px",
@@ -95,7 +96,7 @@ export default function ParticipantsPanel({ socket, users, hostId, currentUserId
                   </button>
                   <button
                     className="btn btn-ghost"
-                    onClick={() => setConfirmModal({ type: "ban", userId: user.id, userIp: user.ip, userName: user.nickname })}
+                    onClick={() => setConfirmModal({ type: "ban", userId: user.id, userName: user.nickname })}
                     title="Bloquear"
                     style={{
                       width: "32px",
@@ -141,7 +142,7 @@ export default function ParticipantsPanel({ socket, users, hostId, currentUserId
           onConfirm={() =>
             confirmModal.type === "kick"
               ? handleKick(confirmModal.userId)
-              : handleBan(confirmModal.userId, confirmModal.userIp)
+              : handleBan(confirmModal.userId)
           }
         />
       )}

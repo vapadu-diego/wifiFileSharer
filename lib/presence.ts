@@ -1,14 +1,9 @@
-import { OnlineUser, PrivateMessage, PrivateFile } from "./types";
+import { OnlineUser } from "./types";
 
 // Maps use persistentId as key (stable across reconnections)
 const onlineUsers = new Map<string, OnlineUser>();          // persistentId → OnlineUser
 const socketToPersistent = new Map<string, string>();       // socketId → persistentId
 const disconnectTimers = new Map<string, NodeJS.Timeout>(); // persistentId → grace period timer
-const privateConversations = new Map<string, PrivateMessage[]>();
-
-function conversationKey(a: string, b: string): string {
-  return [a, b].sort().join(":");
-}
 
 // --- User presence ---
 
@@ -89,6 +84,16 @@ export const getAllUsers = (): OnlineUser[] => {
   return Array.from(onlineUsers.values());
 };
 
+/**
+ * Updates the display nickname of an online user.
+ */
+export const renameUser = (persistentId: string, nickname: string): OnlineUser | undefined => {
+  const user = onlineUsers.get(persistentId);
+  if (!user) return undefined;
+  user.nickname = nickname;
+  return user;
+};
+
 export const getUser = (persistentId: string): OnlineUser | undefined => {
   return onlineUsers.get(persistentId);
 };
@@ -99,130 +104,4 @@ export const getPersistentId = (socketId: string): string | undefined => {
 
 export const getSocketId = (persistentId: string): string | undefined => {
   return onlineUsers.get(persistentId)?.id;
-};
-
-// --- Private messages ---
-
-export const addPrivateMessage = (
-  fromId: string,
-  toId: string,
-  fromName: string,
-  content: string
-): PrivateMessage => {
-  const msg: PrivateMessage = {
-    id: Math.random().toString(36).substr(2, 9),
-    fromId,
-    toId,
-    fromName,
-    content,
-    createdAt: Date.now(),
-  };
-  const key = conversationKey(fromId, toId);
-  if (!privateConversations.has(key)) {
-    privateConversations.set(key, []);
-  }
-  privateConversations.get(key)!.push(msg);
-  return msg;
-};
-
-export const getConversation = (userId1: string, userId2: string): PrivateMessage[] => {
-  const key = conversationKey(userId1, userId2);
-  return privateConversations.get(key) || [];
-};
-
-/**
- * Marks all messages received by `readerId` (from `otherId`) as read.
- * Returns the ids of messages that changed.
- */
-export const markConversationRead = (
-  readerId: string,
-  otherId: string,
-  readAt: number = Date.now()
-): string[] => {
-  const key = conversationKey(readerId, otherId);
-  const messages = privateConversations.get(key);
-  if (!messages) return [];
-
-  const changedIds: string[] = [];
-  for (const msg of messages) {
-    if (msg.toId === readerId && !msg.readAt) {
-      msg.readAt = readAt;
-      changedIds.push(msg.id);
-    }
-  }
-  return changedIds;
-};
-
-export const editPrivateMessage = (
-  fromId: string,
-  toId: string,
-  messageId: string,
-  newContent: string
-): PrivateMessage | undefined => {
-  const key = conversationKey(fromId, toId);
-  const messages = privateConversations.get(key);
-  if (!messages) return undefined;
-
-  const msg = messages.find((m) => m.id === messageId);
-  if (msg) {
-    msg.content = newContent;
-    msg.updatedAt = Date.now();
-  }
-  return msg;
-};
-
-export const deletePrivateMessage = (
-  fromId: string,
-  toId: string,
-  messageId: string
-): boolean => {
-  const key = conversationKey(fromId, toId);
-  const messages = privateConversations.get(key);
-  if (!messages) return false;
-
-  const initialLength = messages.length;
-  const filtered = messages.filter((m) => m.id !== messageId);
-  privateConversations.set(key, filtered);
-  return filtered.length < initialLength;
-};
-
-// --- Private files ---
-
-const privateFiles = new Map<string, PrivateFile[]>();
-
-export const addPrivateFile = (file: PrivateFile): void => {
-  const key = conversationKey(file.fromId, file.toId);
-  if (!privateFiles.has(key)) {
-    privateFiles.set(key, []);
-  }
-  privateFiles.get(key)!.push(file);
-};
-
-export const getPrivateFiles = (userId1: string, userId2: string): PrivateFile[] => {
-  const key = conversationKey(userId1, userId2);
-  return privateFiles.get(key) || [];
-};
-
-export const getPrivateFileById = (fileId: string): PrivateFile | undefined => {
-  for (const files of privateFiles.values()) {
-    const found = files.find((f) => f.id === fileId);
-    if (found) return found;
-  }
-  return undefined;
-};
-
-export const deletePrivateFile = (
-  fromId: string,
-  toId: string,
-  fileId: string
-): PrivateFile | undefined => {
-  const key = conversationKey(fromId, toId);
-  const files = privateFiles.get(key);
-  if (!files) return undefined;
-
-  const index = files.findIndex((f) => f.id === fileId);
-  if (index === -1) return undefined;
-
-  const [removed] = files.splice(index, 1);
-  return removed;
 };

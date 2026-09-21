@@ -12,24 +12,18 @@ import {
   OnlineUser,
   PrivateMessage,
   PrivateFile,
+  ReplyRef,
 } from "@/lib/types";
 import { generateUUID } from "@/app/hooks/useSession";
 import FileIcon from "./FileIcon";
 import FormattedMessage from "./FormattedMessage";
 import EmojiPicker, { insertAtCursor } from "./EmojiPicker";
+import { ReplyQuote, ReplyPreview } from "./ReplyQuote";
+import { useSelectionCopy } from "@/app/hooks/useSelectionCopy";
+import { ToastItem } from "@/app/hooks/useToasts";
+import { buildMessageReply, buildSelectionReply, getSelectionNodes } from "@/lib/reply";
 import { formatJsonContent } from "@/lib/jsonFormat";
-import {
-  getLocalMessages,
-  saveLocalMessages,
-  addLocalMessage,
-  getLocalFiles,
-  saveLocalFiles,
-  addLocalFile,
-  editLocalMessage,
-  deleteLocalMessage,
-  deleteLocalFile,
-  markLocalMessagesRead
-} from "@/lib/chatPersistence";
+import { getLegacyMessages, clearLegacyMessages } from "@/lib/legacyChat";
 
 interface PrivateChatViewProps {
   socket: Socket;
@@ -38,19 +32,39 @@ interface PrivateChatViewProps {
   currentUserName: string;
   myUserId: string;
   onBack: () => void;
+  pushToast?: (toast: Omit<ToastItem, "id">, durationMs?: number) => void;
 }
 
-interface MessagesResponse {
+interface MessagesPageResponse {
   messages: PrivateMessage[];
+  hasMore: boolean;
+}
+
+interface MessageContextResponse {
+  messages: PrivateMessage[];
+  hasMoreBefore: boolean;
+  hasMoreAfter: boolean;
 }
 
 interface FilesResponse {
   files: PrivateFile[];
 }
 
+interface UpdatesResponse {
+  updated: PrivateMessage[];
+  deleted: string[];
+}
+
+interface ImportResponse {
+  success: boolean;
+  imported: number;
+  error?: string;
+}
+
 interface SendMessageResponse {
   success: boolean;
   message?: PrivateMessage;
+  error?: string;
 }
 
 interface MutationResponse {
@@ -101,7 +115,38 @@ function copyToClipboard(text: string): Promise<void> {
   }
 }
 
-const PAGE_SIZE = 30;
+function ReplyButton({ onClick }: { onClick: () => void }) {
+  return (
+    <button
+      onClick={(e) => {
+        e.stopPropagation();
+        onClick();
+      }}
+      title="Responder"
+      className="msg-reply-btn"
+      style={{
+        background: "none",
+        border: "none",
+        cursor: "pointer",
+        padding: 0,
+        display: "flex",
+        alignItems: "center",
+        justifyContent: "center",
+        color: "currentColor",
+        opacity: 0.6,
+        transition: "all 0.2s",
+      }}
+    >
+      <svg width="11" height="11" fill="none" stroke="currentColor" strokeWidth="2.5" viewBox="0 0 24 24">
+        <polyline points="9 17 4 12 9 7" />
+        <path d="M20 18v-2a4 4 0 0 0-4-4H4" />
+      </svg>
+    </button>
+  );
+}
+
+const PAGE_SIZE = 50;
+const CONTEXT_LIMIT = 25;
 
 export default function PrivateChatView({
   socket,
@@ -110,6 +155,7 @@ export default function PrivateChatView({
   currentUserName,
   myUserId,
   onBack,
+  pushToast,
 }: PrivateChatViewProps) {
   const [messages, setMessages] = useState<PrivateMessage[]>([]);
   const [files, setFiles] = useState<PrivateFile[]>([]);
@@ -118,10 +164,12 @@ export default function PrivateChatView({
   const [dragActive, setDragActive] = useState(false);
   const [uploadError, setUploadError] = useState("");
   const [copiedId, setCopiedId] = useState<string | null>(null);
-  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+  const [hasMoreOlder, setHasMoreOlder] = useState(false);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const isAtBottomRef = useRef(true);
   const initialLoadDoneRef = useRef(false);
+  const initialPageLoadedRef = useRef(false);
+  const loadingOlderRef = useRef(false);
   const settleTimerRef = useRef<number | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -129,18 +177,22 @@ export default function PrivateChatView({
   const contextMenuRef = useRef<HTMLDivElement>(null);
   const forceScrollToBottomRef = useRef(false);
   const lastSyncTimeRef = useRef(0);
-  const pendingQueueRef = useRef<Array<{ tempId: string; content: string; createdAt: number }>>([]);
+  const pendingQueueRef = useRef<Array<{ tempId: string; content: string; createdAt: number; replyTo?: ReplyRef }>>([]);
   const [pendingIds, setPendingIds] = useState<Set<string>>(new Set());
-  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; targetType: "message" | "file"; messageId?: string; content?: string; fileId?: string } | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; targetType: "message" | "file"; messageId?: string; content?: string; fileId?: string; hasSelection?: boolean; selectionReply?: ReplyRef | null } | null>(null);
   const [editingMessageId, setEditingMessageId] = useState<string | null>(null);
   const [editingText, setEditingText] = useState("");
   const [editingOriginalText, setEditingOriginalText] = useState("");
+  const [replyTo, setReplyTo] = useState<ReplyRef | null>(null);
 
   // Suggestions state
   const [showSuggestions, setShowSuggestions] = useState(false);
   const [slashInfo, setSlashInfo] = useState<{ query: string; slashIndex: number } | null>(null);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+  const [missingFileIds, setMissingFileIds] = useState<Set<string>>(new Set());
+  const checkedFileIdsRef = useRef<Set<string>>(new Set());
+  const [fileCheckVersion, setFileCheckVersion] = useState(0);
 
   // Scroll-down button / new message highlight / typing / read receipts
   const [isAtBottom, setIsAtBottom] = useState(true);
@@ -185,6 +237,20 @@ export default function PrivateChatView({
     });
   }, []);
 
+  // Selecting text inside a bubble copies it automatically and shows a toast
+  const handleSelectionCopied = useCallback(() => {
+    pushToast?.({ icon: "✅", title: "Texto copiado", variant: "light" }, 2000);
+  }, [pushToast]);
+
+  const notifyError = useCallback((error?: string) => {
+    pushToast?.({ icon: "⚠️", title: "Operación rechazada", body: error || "Inténtalo de nuevo" });
+  }, [pushToast]);
+
+  useSelectionCopy(messagesContainerRef, {
+    enabled: !editingMessageId,
+    onCopied: handleSelectionCopied,
+  });
+
   const copyMessage = (id: string, text: string) => {
     copyToClipboard(text).then(() => {
       setCopiedId(id);
@@ -192,20 +258,52 @@ export default function PrivateChatView({
     });
   };
 
+  const hasSelectionInBubble = (messageId: string): boolean => {
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed) return false;
+    const bubble = document.getElementById(`msg-${messageId}`);
+    if (!bubble) return false;
+    const { anchorEl, focusEl } = getSelectionNodes(selection);
+    return !!anchorEl && !!focusEl && bubble.contains(anchorEl) && bubble.contains(focusEl);
+  };
+
+  const startReply = (msg: PrivateMessage, useSelection = true) => {
+    let ref: ReplyRef | null = null;
+    if (useSelection && hasSelectionInBubble(msg.id)) {
+      const selection = window.getSelection();
+      if (selection) {
+        ref = buildSelectionReply({ id: msg.id, senderName: msg.fromName }, selection);
+      }
+    }
+    if (!ref) ref = buildMessageReply(msg.id, msg.fromName, msg.content);
+    setReplyTo(ref);
+    setContextMenu(null);
+    inputRef.current?.focus({ preventScroll: true });
+  };
+
   const handleContextMenu = (e: React.MouseEvent, msg: PrivateMessage) => {
-    const isMine = msg.fromId === currentUserId;
-    if (!isMine) return; // Only allow context menu for own messages
     e.preventDefault();
-    const MENU_WIDTH = 130;
-    const MENU_HEIGHT = 85;
+    const MENU_WIDTH = 150;
+    const MENU_HEIGHT = 120;
     const x = Math.max(10, Math.min(e.clientX, window.innerWidth - MENU_WIDTH - 10));
     const y = Math.max(10, Math.min(e.clientY, window.innerHeight - MENU_HEIGHT - 10));
+
+    let selectionReply: ReplyRef | null = null;
+    if (hasSelectionInBubble(msg.id)) {
+      const selection = window.getSelection();
+      if (selection) {
+        selectionReply = buildSelectionReply({ id: msg.id, senderName: msg.fromName }, selection);
+      }
+    }
+
     setContextMenu({
       x,
       y,
       targetType: "message",
       messageId: msg.id,
       content: msg.content,
+      hasSelection: !!selectionReply,
+      selectionReply,
     });
   };
 
@@ -251,9 +349,14 @@ export default function PrivateChatView({
       { id: editingMessageId, toId: partner.persistentId, content },
       (res: MutationResponse) => {
         if (res.success) {
-          const updated = editLocalMessage(myUserId, partner.persistentId, editingMessageId, content);
-          setMessages(updated);
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === editingMessageId ? { ...m, content, updatedAt: Date.now() } : m
+            )
+          );
           cancelEdit();
+        } else {
+          notifyError(res.error);
         }
       }
     );
@@ -266,10 +369,11 @@ export default function PrivateChatView({
       { id: contextMenu.messageId, toId: partner.persistentId },
       (res: MutationResponse) => {
         if (res.success) {
-          const updated = deleteLocalMessage(myUserId, partner.persistentId, contextMenu.messageId!);
-          setMessages(updated);
-          setContextMenu(null);
+          setMessages((prev) => prev.filter((m) => m.id !== contextMenu.messageId));
+        } else {
+          notifyError(res.error);
         }
+        setContextMenu(null);
       }
     );
   };
@@ -280,12 +384,23 @@ export default function PrivateChatView({
       { id: fileId, toId: partner.persistentId },
       (res: MutationResponse) => {
         if (res.success) {
-          const updated = deleteLocalFile(myUserId, partner.persistentId, fileId);
-          setFiles(updated);
+          setFiles((prev) => prev.filter((f) => f.id !== fileId));
+        } else {
+          notifyError(res.error);
         }
         setContextMenu(null);
       }
     );
+  };
+
+  const removeExpiredFile = (fileId: string) => {
+    setFiles((prev) => prev.filter((f) => f.id !== fileId));
+    setMissingFileIds((prev) => {
+      const next = new Set(prev);
+      next.delete(fileId);
+      return next;
+    });
+    checkedFileIdsRef.current.delete(fileId);
   };
 
 
@@ -307,7 +422,10 @@ export default function PrivateChatView({
     setPartnerTyping(false);
     setHighlightId(null);
     initialLoadDoneRef.current = false;
-    setVisibleCount(PAGE_SIZE);
+    initialPageLoadedRef.current = false;
+    setHasMoreOlder(false);
+    setMessages([]);
+    setFiles([]);
   }, [partner.persistentId]);
 
   // Auto-expand textarea based on content (up to 7 lines)
@@ -327,12 +445,16 @@ export default function PrivateChatView({
           setShowEmojiPicker(false);
           return;
         }
+        if (replyTo) {
+          setReplyTo(null);
+          return;
+        }
         onBack();
       }
     };
     window.addEventListener("keydown", handleGlobalKeyDown);
     return () => window.removeEventListener("keydown", handleGlobalKeyDown);
-  }, [onBack, showSuggestions, editingMessageId, showEmojiPicker]);
+  }, [onBack, showSuggestions, editingMessageId, showEmojiPicker, replyTo]);
 
   // Close context menu on click anywhere
   useEffect(() => {
@@ -346,170 +468,167 @@ export default function PrivateChatView({
     return () => window.removeEventListener("click", handleOuterClick);
   }, []);
 
-  // Load local history & resync
+  // Initial load: latest page from the server + legacy local import (once)
   useEffect(() => {
-    const localMsgs = getLocalMessages(myUserId, partner.persistentId);
-    const localFls = getLocalFiles(myUserId, partner.persistentId);
-    setMessages(localMsgs);
-    setFiles(localFls);
+    initialPageLoadedRef.current = false;
+    let cancelled = false;
 
-    const lastMsgTime = localMsgs.length > 0 ? localMsgs[localMsgs.length - 1].createdAt : 0;
-    const lastFileTime = localFls.length > 0 ? localFls[localFls.length - 1].createdAt : 0;
-    const since = Math.max(lastMsgTime, lastFileTime);
-    lastSyncTimeRef.current = since;
-
-    const handleReconnect = () => {
-      const currentSince = lastSyncTimeRef.current;
-      if (currentSince > 0) {
-        socket.emit("get_private_messages_since",
-          { withUserId: partner.persistentId, since: currentSince },
-          (res: MessagesResponse) => {
-            if (res.messages?.length) {
-              setMessages(prev => {
-                const existingIds = new Set(prev.map(m => m.id));
-                const newMsgs = res.messages.filter(m => !existingIds.has(m.id));
-                const updated = newMsgs.length > 0 ? [...prev, ...newMsgs] : prev;
-                saveLocalMessages(myUserId, partner.persistentId, updated);
-                return updated;
-              });
-              emitRead();
-            }
-            setTimeout(() => { markInitialLoadDone(); }, 0);
-          }
-        );
-        socket.emit("get_private_files_since",
-          { withUserId: partner.persistentId, since: currentSince },
-          (res: FilesResponse) => {
-            if (res.files?.length) {
-              setFiles(prev => {
-                const existingIds = new Set(prev.map(f => f.id));
-                const newFiles = res.files.filter(f => !existingIds.has(f.id));
-                const updated = newFiles.length > 0 ? [...prev, ...newFiles] : prev;
-                saveLocalFiles(myUserId, partner.persistentId, updated);
-                return updated;
-              });
-            }
-            setTimeout(() => { markInitialLoadDone(); }, 0);
-          }
-        );
-      } else {
-        socket.emit("get_private_messages",
-          { withUserId: partner.persistentId },
-          (res: MessagesResponse) => {
-            if (res.messages) {
-              setMessages(res.messages);
-              saveLocalMessages(myUserId, partner.persistentId, res.messages);
-              emitRead();
-            }
-            setTimeout(() => { markInitialLoadDone(); }, 0);
-          }
-        );
-        socket.emit("get_private_files",
-          { withUserId: partner.persistentId },
-          (res: FilesResponse) => {
-            if (res.files) {
-              setFiles(res.files);
-              saveLocalFiles(myUserId, partner.persistentId, res.files);
-            }
-            setTimeout(() => { markInitialLoadDone(); }, 0);
-          }
-        );
+    const mergeById = (prev: PrivateMessage[], incoming: PrivateMessage[]): PrivateMessage[] => {
+      const byId = new Map(prev.map((m) => [m.id, m]));
+      let changed = false;
+      for (const msg of incoming) {
+        const existing = byId.get(msg.id);
+        if (!existing || (msg.updatedAt ?? 0) > (existing.updatedAt ?? 0)) {
+          byId.set(msg.id, { ...existing, ...msg });
+          changed = true;
+        }
       }
+      if (!changed) return prev;
+      return Array.from(byId.values()).sort(
+        (a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id)
+      );
+    };
+
+    const loadLatestPage = () => {
+      socket.emit(
+        "get_private_messages_page",
+        { withUserId: partner.persistentId, limit: PAGE_SIZE },
+        (res: MessagesPageResponse) => {
+          if (cancelled) return;
+          const page = res?.messages || [];
+          setMessages((prev) => (initialPageLoadedRef.current ? mergeById(prev, page) : page));
+          setHasMoreOlder(res?.hasMore === true);
+          const newest = page.length > 0 ? page[page.length - 1].createdAt : 0;
+          if (newest > 0) lastSyncTimeRef.current = newest;
+          initialPageLoadedRef.current = true;
+          emitRead();
+          setTimeout(() => { markInitialLoadDone(); }, 0);
+        }
+      );
+      socket.emit("get_private_files", { withUserId: partner.persistentId }, (res: FilesResponse) => {
+        if (!cancelled && res?.files) setFiles(res.files);
+      });
+    };
+
+    // One-time migration of the legacy localStorage history (own messages only)
+    const importLegacy = () => {
+      const legacy = getLegacyMessages(myUserId, partner.persistentId).filter(
+        (m) => m.fromId === currentUserId
+      );
+      if (legacy.length === 0) return;
+      socket.emit(
+        "import_local_messages",
+        { withUserId: partner.persistentId, messages: legacy },
+        (res: ImportResponse) => {
+          if (cancelled || !res?.success) return;
+          clearLegacyMessages(myUserId, partner.persistentId);
+          if (res.imported > 0) loadLatestPage();
+        }
+      );
     };
 
     if (socket.connected) {
-      handleReconnect();
+      loadLatestPage();
+      importLegacy();
     }
+    const onConnect = () => {
+      if (!initialPageLoadedRef.current) {
+        loadLatestPage();
+        importLegacy();
+      }
+    };
+    socket.on("connect", onConnect);
+
+    return () => {
+      cancelled = true;
+      socket.off("connect", onConnect);
+    };
+  }, [socket, partner.persistentId, myUserId, currentUserId, emitRead, markInitialLoadDone]);
+
+  // Reconnect: gap fill + reconcile edits/deletions made while offline (B4)
+  useEffect(() => {
+    const handleReconnect = () => {
+      if (!initialPageLoadedRef.current) return;
+      const since = lastSyncTimeRef.current;
+      if (since <= 0) return;
+
+      socket.emit(
+        "get_private_messages_since",
+        { withUserId: partner.persistentId, since },
+        (res: MessagesPageResponse) => {
+          if (!res?.messages?.length) return;
+          setMessages((prev) => {
+            const existing = new Set(prev.map((m) => m.id));
+            const fresh = res.messages.filter((m) => !existing.has(m.id));
+            if (fresh.length === 0) return prev;
+            return [...prev, ...fresh].sort(
+              (a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id)
+            );
+          });
+          const newest = res.messages[res.messages.length - 1].createdAt;
+          if (newest > lastSyncTimeRef.current) lastSyncTimeRef.current = newest;
+          emitRead();
+        }
+      );
+      socket.emit(
+        "get_private_updates_since",
+        { withUserId: partner.persistentId, since },
+        (res: UpdatesResponse) => {
+          if (!res || (!res.updated?.length && !res.deleted?.length)) return;
+          setMessages((prev) => {
+            let next = prev;
+            if (res.updated?.length) {
+              const byId = new Map(res.updated.map((m) => [m.id, m]));
+              next = next.map((m) => byId.get(m.id) ?? m);
+            }
+            if (res.deleted?.length) {
+              const del = new Set(res.deleted);
+              next = next.filter((m) => !del.has(m.id));
+            }
+            return next;
+          });
+        }
+      );
+    };
+
     socket.on("connect", handleReconnect);
-
-    if (partner.isOnline !== false) {
-      socket.emit("private_sync_ping", {
-        toSocketId: partner.id,
-        fromUserId: myUserId,
-        lastTimestamp: since
-      });
-    }
-
     return () => {
       socket.off("connect", handleReconnect);
     };
-  }, [socket, partner.persistentId, partner.id, partner.isOnline, myUserId, emitRead, markInitialLoadDone]);
+  }, [socket, partner.persistentId, emitRead]);
 
-  // Listen for P2P sync requests and data
-  useEffect(() => {
-    const syncPingHandler = (msg: { fromSocketId: string; fromUserId: string; lastTimestamp: number }) => {
-      if (msg.fromUserId !== partner.persistentId) return;
+  // Load the previous page when the user scrolls to the top
+  const loadOlderPage = useCallback(() => {
+    if (loadingOlderRef.current || !hasMoreOlder) return;
+    const container = messagesContainerRef.current;
+    const first = messages[0];
+    if (!container || !first) return;
 
-      const localMsgs = getLocalMessages(myUserId, partner.persistentId);
-      const localFls = getLocalFiles(myUserId, partner.persistentId);
-      
-      const lastMsg = localMsgs[localMsgs.length - 1];
-      const t_mine = lastMsg ? lastMsg.createdAt : 0;
+    loadingOlderRef.current = true;
+    const oldScrollHeight = container.scrollHeight;
 
-      if (t_mine > msg.lastTimestamp) {
-        const newMsgs = localMsgs.filter(m => m.createdAt > msg.lastTimestamp);
-        const newFls = localFls.filter(f => f.createdAt > msg.lastTimestamp);
-        socket.emit("private_sync_data", {
-          toSocketId: msg.fromSocketId,
-          fromUserId: myUserId,
-          messages: newMsgs,
-          files: newFls
+    socket.emit(
+      "get_private_messages_page",
+      {
+        withUserId: partner.persistentId,
+        before: { createdAt: first.createdAt, id: first.id },
+        limit: PAGE_SIZE,
+      },
+      (res: MessagesPageResponse) => {
+        setMessages((prev) => {
+          const existing = new Set(prev.map((m) => m.id));
+          const older = (res?.messages || []).filter((m) => !existing.has(m.id));
+          return older.length > 0 ? [...older, ...prev] : prev;
         });
-      } else if (t_mine < msg.lastTimestamp) {
-        socket.emit("private_sync_ping", {
-          toSocketId: msg.fromSocketId,
-          fromUserId: myUserId,
-          lastTimestamp: t_mine
+        setHasMoreOlder(res?.hasMore === true);
+        requestAnimationFrame(() => {
+          const c = messagesContainerRef.current;
+          if (c) c.scrollTop = c.scrollHeight - oldScrollHeight;
+          loadingOlderRef.current = false;
         });
       }
-    };
-
-    const syncDataHandler = (data: { fromUserId: string; messages: PrivateMessage[]; files: PrivateFile[] }) => {
-      if (data.fromUserId !== partner.persistentId) return;
-
-      const updatedMsgs = [...getLocalMessages(myUserId, partner.persistentId)];
-      const updatedFls = [...getLocalFiles(myUserId, partner.persistentId)];
-
-      let changed = false;
-      if (data.messages && data.messages.length > 0) {
-        data.messages.forEach(msg => {
-          if (!updatedMsgs.some(m => m.id === msg.id)) {
-            updatedMsgs.push(msg);
-            changed = true;
-          }
-        });
-        if (changed) {
-          updatedMsgs.sort((a, b) => a.createdAt - b.createdAt);
-          saveLocalMessages(myUserId, partner.persistentId, updatedMsgs);
-          setMessages(updatedMsgs);
-          emitRead();
-        }
-      }
-
-      if (data.files && data.files.length > 0) {
-        let filesChanged = false;
-        data.files.forEach(file => {
-          if (!updatedFls.some(f => f.id === file.id)) {
-            updatedFls.push(file);
-            filesChanged = true;
-          }
-        });
-        if (filesChanged) {
-          updatedFls.sort((a, b) => a.createdAt - b.createdAt);
-          saveLocalFiles(myUserId, partner.persistentId, updatedFls);
-          setFiles(updatedFls);
-        }
-      }
-    };
-
-    socket.on("private_sync_ping", syncPingHandler);
-    socket.on("private_sync_data", syncDataHandler);
-
-    return () => {
-      socket.off("private_sync_ping", syncPingHandler);
-      socket.off("private_sync_data", syncDataHandler);
-    };
-  }, [socket, partner.persistentId, myUserId, emitRead]);
+    );
+  }, [socket, partner.persistentId, messages, hasMoreOlder]);
 
   // Listen for new messages
   useEffect(() => {
@@ -519,8 +638,12 @@ export default function PrivateChatView({
         (msg.fromId === currentUserId && msg.toId === partner.persistentId)
       ) {
         const isIncoming = msg.fromId === partner.persistentId;
-        const updated = addLocalMessage(myUserId, partner.persistentId, msg);
-        setMessages(updated);
+        setMessages((prev) => {
+          if (prev.some((m) => m.id === msg.id)) return prev;
+          return [...prev, msg].sort(
+            (a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id)
+          );
+        });
         if (isIncoming) {
           emitRead();
           flashMessage(msg.id);
@@ -535,8 +658,10 @@ export default function PrivateChatView({
         (f.fromId === partner.persistentId && f.toId === currentUserId) ||
         (f.fromId === currentUserId && f.toId === partner.persistentId)
       ) {
-        const updated = addLocalFile(myUserId, partner.persistentId, f);
-        setFiles(updated);
+        setFiles((prev) => {
+          if (prev.some((file) => file.id === f.id)) return prev;
+          return [...prev, f].sort((a, b) => a.createdAt - b.createdAt);
+        });
       }
     };
     const msgEditedHandler = ({ id, fromId, content }: { id: string; fromId: string; content: string }) => {
@@ -569,7 +694,10 @@ export default function PrivateChatView({
     };
     const readHandler = ({ fromUserId, messageIds }: { fromUserId: string; messageIds: string[] }) => {
       if (fromUserId !== partner.persistentId) return;
-      setMessages(markLocalMessagesRead(myUserId, partner.persistentId, messageIds));
+      const ids = new Set(messageIds);
+      setMessages((prev) =>
+        prev.map((m) => (ids.has(m.id) && !m.readAt ? { ...m, readAt: Date.now() } : m))
+      );
     };
 
     socket.on("private_message", msgHandler);
@@ -606,7 +734,58 @@ export default function PrivateChatView({
     })),
   ].sort((a, b) => a.createdAt - b.createdAt);
 
-  const visibleEntries = entries.slice(-visibleCount);
+  const visibleEntries = entries;
+
+  const highlightCodeLines = (el: HTMLElement, reply: ReplyRef) => {
+    if (reply.kind !== "code" || !reply.startLine) return;
+    const start = reply.startLine;
+    const end = reply.endLine ?? start;
+    el.querySelectorAll<HTMLElement>(".code-line").forEach((lineEl) => {
+      const num = Number(lineEl.dataset.line);
+      if (num >= start && num <= end) {
+        lineEl.classList.add("code-line-flash");
+        window.setTimeout(() => lineEl.classList.remove("code-line-flash"), 1700);
+      }
+    });
+    const targetLine = el.querySelector<HTMLElement>(`.code-line[data-line="${start}"]`);
+    if (targetLine && el.scrollHeight > el.clientHeight) {
+      targetLine.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+  };
+
+  const jumpToMessage = (reply: ReplyRef) => {
+    const el = document.getElementById(`msg-${reply.id}`);
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      flashMessage(reply.id);
+      highlightCodeLines(el, reply);
+      return;
+    }
+
+    // The quoted message is outside the loaded window: fetch a page around it
+    socket.emit(
+      "get_private_message_context",
+      { withUserId: partner.persistentId, messageId: reply.id, limit: CONTEXT_LIMIT },
+      (res: MessageContextResponse) => {
+        if (!res?.messages?.length) return;
+        setMessages((prev) => {
+          const byId = new Map(prev.map((m) => [m.id, m]));
+          for (const msg of res.messages) byId.set(msg.id, msg);
+          return Array.from(byId.values()).sort(
+            (a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id)
+          );
+        });
+        setHasMoreOlder(res.hasMoreBefore === true);
+        window.setTimeout(() => {
+          const target = document.getElementById(`msg-${reply.id}`);
+          if (!target) return;
+          target.scrollIntoView({ behavior: "smooth", block: "center" });
+          flashMessage(reply.id);
+          highlightCodeLines(target, reply);
+        }, 80);
+      }
+    );
+  };
 
   const handleMessagesScroll = (e: React.UIEvent<HTMLDivElement>) => {
     const container = e.currentTarget;
@@ -619,12 +798,8 @@ export default function PrivateChatView({
       if (atBottom) setUnseenCount(0);
     }
 
-    if (container.scrollTop === 0 && visibleCount < entries.length) {
-      const oldScrollHeight = container.scrollHeight;
-      setVisibleCount((prev) => Math.min(prev + PAGE_SIZE, entries.length));
-      requestAnimationFrame(() => {
-        container.scrollTop = container.scrollHeight - oldScrollHeight;
-      });
+    if (container.scrollTop === 0) {
+      loadOlderPage();
     }
   };
 
@@ -704,51 +879,6 @@ export default function PrivateChatView({
     lastSyncTimeRef.current = Math.max(lastMsgTime, lastFileTime);
   }, [messages, files]);
 
-  // Resync on reconnection — fetch messages missed while disconnected
-  useEffect(() => {
-    const handleReconnect = () => {
-      const since = lastSyncTimeRef.current;
-      if (since > 0) {
-        socket.emit("get_private_messages_since",
-          { withUserId: partner.persistentId, since },
-          (res: MessagesResponse) => {
-            if (res.messages?.length) {
-              setMessages(prev => {
-                const existingIds = new Set(prev.map(m => m.id));
-                const newMsgs = res.messages.filter(m => !existingIds.has(m.id));
-                return newMsgs.length > 0 ? [...prev, ...newMsgs] : prev;
-              });
-              emitRead();
-            }
-          }
-        );
-        socket.emit("get_private_files_since",
-          { withUserId: partner.persistentId, since },
-          (res: FilesResponse) => {
-            if (res.files?.length) {
-              setFiles(prev => {
-                const existingIds = new Set(prev.map(f => f.id));
-                const newFiles = res.files.filter(f => !existingIds.has(f.id));
-                return newFiles.length > 0 ? [...prev, ...newFiles] : prev;
-              });
-            }
-          }
-        );
-      } else {
-        socket.emit("get_private_messages",
-          { withUserId: partner.persistentId },
-          (res: MessagesResponse) => { if (res.messages) setMessages(res.messages); }
-        );
-        socket.emit("get_private_files",
-          { withUserId: partner.persistentId },
-          (res: FilesResponse) => { if (res.files) setFiles(res.files); }
-        );
-      }
-    };
-    socket.on("connect", handleReconnect);
-    return () => { socket.off("connect", handleReconnect); };
-  }, [socket, partner.persistentId, emitRead]);
-
   // Flush offline queue on reconnect
   useEffect(() => {
     const flushQueue = () => {
@@ -759,12 +889,19 @@ export default function PrivateChatView({
       for (const pending of queue) {
         socket.emit(
           "send_private_message",
-          { toId: partner.persistentId, content: pending.content },
+          { toId: partner.persistentId, content: pending.content, replyTo: pending.replyTo },
           (res: SendMessageResponse) => {
             if (res.success && res.message) {
               setMessages(prev => prev.map(m =>
                 m.id === pending.tempId ? res.message! : m
               ));
+              setPendingIds(prev => {
+                const next = new Set(prev);
+                next.delete(pending.tempId);
+                return next;
+              });
+            } else {
+              notifyError(res.error);
               setPendingIds(prev => {
                 const next = new Set(prev);
                 next.delete(pending.tempId);
@@ -777,7 +914,56 @@ export default function PrivateChatView({
     };
     socket.on("connect", flushQueue);
     return () => { socket.off("connect", flushQueue); };
-  }, [socket, partner.persistentId]);
+  }, [socket, partner.persistentId, notifyError]);
+
+  // Check which shared files still exist on the server (they are ephemeral:
+  // they disappear when the server restarts)
+  useEffect(() => {
+    const ids = files
+      .filter((f) => !checkedFileIdsRef.current.has(f.id))
+      .map((f) => f.id);
+    if (ids.length === 0) return;
+    ids.forEach((id) => checkedFileIdsRef.current.add(id));
+
+    let cancelled = false;
+    Promise.all(
+      ids.map(async (id) => {
+        try {
+          const res = await fetch(`/api/private-file-status/${id}`);
+          const data = await res.json();
+          return { id, exists: !!data.exists };
+        } catch {
+          return { id, exists: true };
+        }
+      })
+    ).then((results) => {
+      if (cancelled) return;
+      const missing = results.filter((r) => !r.exists).map((r) => r.id);
+      if (missing.length > 0) {
+        setMissingFileIds((prev) => {
+          const next = new Set(prev);
+          missing.forEach((id) => next.add(id));
+          return next;
+        });
+      }
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [files, fileCheckVersion]);
+
+  // Re-check files after a reconnection (the server may have restarted)
+  useEffect(() => {
+    const handleConnect = () => {
+      checkedFileIdsRef.current = new Set();
+      setMissingFileIds(new Set());
+      setFileCheckVersion((prev) => prev + 1);
+    };
+    socket.on("connect", handleConnect);
+    return () => {
+      socket.off("connect", handleConnect);
+    };
+  }, [socket]);
 
   // Scroll to the newest message (used when sending a message/file)
   const scrollToBottom = () => {
@@ -801,14 +987,17 @@ export default function PrivateChatView({
     let content = text.trim();
     content = formatJsonContent(content);
 
+    const reply = replyTo;
+
     setText("");
+    setReplyTo(null);
     setShowSuggestions(false);
     inputRef.current?.focus({ preventScroll: true });
 
     if (!socket.connected) {
       // Queue for later — show as pending in the UI
       const tempId = generateUUID();
-      pendingQueueRef.current.push({ tempId, content, createdAt: Date.now() });
+      pendingQueueRef.current.push({ tempId, content, createdAt: Date.now(), replyTo: reply ?? undefined });
       setPendingIds(prev => new Set(prev).add(tempId));
       setMessages(prev => [...prev, {
         id: tempId,
@@ -817,6 +1006,7 @@ export default function PrivateChatView({
         fromName: currentUserName,
         content,
         createdAt: Date.now(),
+        replyTo: reply ?? undefined,
       }]);
       forceScrollToBottomRef.current = true;
       scrollToBottom();
@@ -825,13 +1015,21 @@ export default function PrivateChatView({
 
     socket.emit(
       "send_private_message",
-      { toId: partner.persistentId, content },
+      { toId: partner.persistentId, content, replyTo: reply ?? undefined },
       (res: SendMessageResponse) => {
         if (res.success && res.message) {
-          const updated = addLocalMessage(myUserId, partner.persistentId, res.message);
-          setMessages(updated);
+          setMessages((prev) => {
+            if (prev.some((m) => m.id === res.message!.id)) return prev;
+            return [...prev, res.message!].sort(
+              (a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id)
+            );
+          });
           forceScrollToBottomRef.current = true;
           scrollToBottom();
+        } else {
+          notifyError(res.error);
+          // Give the user their text back instead of losing it silently
+          setText(prev => (prev.trim() ? prev : content));
         }
       },
     );
@@ -859,8 +1057,11 @@ export default function PrivateChatView({
       }
       const data = await res.json();
       if (data.success && data.file) {
-        const updated = addLocalFile(myUserId, partner.persistentId, data.file);
-        setFiles(updated);
+        setFiles((prev) =>
+          prev.some((f) => f.id === data.file.id)
+            ? prev
+            : [...prev, data.file].sort((a, b) => a.createdAt - b.createdAt)
+        );
         forceScrollToBottomRef.current = true;
         scrollToBottom();
       }
@@ -1000,6 +1201,7 @@ export default function PrivateChatView({
     >
       {/* Header */}
       <div
+        className="chat-header"
         style={{
           padding: "0.75rem 1rem",
           borderBottom: "1px solid var(--card-border)",
@@ -1079,6 +1281,7 @@ export default function PrivateChatView({
         }}
       >
       <div
+        className="chat-messages"
         style={{
           flex: 1,
           minHeight: 0,
@@ -1118,6 +1321,8 @@ export default function PrivateChatView({
               return (
                 <div
                   key={entry.id}
+                  id={`msg-${msg.id}`}
+                  data-message-id={msg.id}
                   className={`message-bubble animate-fadeIn ${highlightId === msg.id ? "animate-message-flash" : ""}`}
                   onContextMenu={(e) => handleContextMenu(e, msg)}
                   style={{
@@ -1190,6 +1395,9 @@ export default function PrivateChatView({
                     </div>
                   ) : (
                     <>
+                      {msg.replyTo && (
+                        <ReplyQuote reply={msg.replyTo} onJump={jumpToMessage} />
+                      )}
                       <div
                         style={{
                           fontSize: "0.9rem",
@@ -1209,6 +1417,7 @@ export default function PrivateChatView({
                       >
                         {isMine ? (
                           <>
+                            <ReplyButton onClick={() => startReply(msg)} />
                             <button
                               onClick={(e) => {
                                 e.stopPropagation();
@@ -1264,6 +1473,7 @@ export default function PrivateChatView({
                           </>
                         ) : (
                           <>
+                            <ReplyButton onClick={() => startReply(msg)} />
                             <button
                               onClick={(e) => {
                                 e.stopPropagation();
@@ -1317,6 +1527,50 @@ export default function PrivateChatView({
                 >
                   {/* Image preview */}
                   {isImage(file.type) ? (
+                    missingFileIds.has(file.id) ? (
+                      <div
+                        style={{
+                          background: "rgba(255,255,255,0.03)",
+                          borderRadius: "var(--radius)",
+                          border: "1px solid var(--card-border)",
+                          overflow: "hidden",
+                          opacity: 0.55,
+                        }}
+                      >
+                        <div
+                          style={{
+                            display: "flex",
+                            flexDirection: "column",
+                            alignItems: "center",
+                            gap: "8px",
+                            padding: "1.25rem 1rem",
+                          }}
+                        >
+                          <svg
+                            width="28"
+                            height="28"
+                            fill="none"
+                            stroke="var(--muted)"
+                            strokeWidth="1.5"
+                            viewBox="0 0 24 24"
+                          >
+                            <rect x="3" y="11" width="18" height="11" rx="2" />
+                            <path d="M7 11V7a5 5 0 0 1 10 0v4" />
+                          </svg>
+                          <span style={{ fontSize: "0.8rem", color: "var(--muted)" }}>
+                            Archivo expirado
+                          </span>
+                          <button
+                            type="button"
+                            className="btn btn-ghost btn-sm"
+                            onClick={() => removeExpiredFile(file.id)}
+                            style={{ padding: "4px 10px", fontSize: "0.7rem" }}
+                          >
+                            Quitar del historial
+                          </button>
+                        </div>
+                      </div>
+                    ) : (
                     <div
                       style={{
                         background: "rgba(255,255,255,0.03)",
@@ -1341,6 +1595,9 @@ export default function PrivateChatView({
                             "_blank",
                           )
                         }
+                        onError={() => {
+                          setMissingFileIds((prev) => new Set(prev).add(file.id));
+                        }}
                         onLoad={() => {
                           const container = messagesContainerRef.current;
                           if (container && isAtBottomRef.current) {
@@ -1387,6 +1644,7 @@ export default function PrivateChatView({
                         </a>
                       </div>
                     </div>
+                    )
                   ) : (
                     /* File card for non-images */
                     <div
@@ -1402,6 +1660,7 @@ export default function PrivateChatView({
                         display: "flex",
                         alignItems: "center",
                         gap: "10px",
+                        opacity: missingFileIds.has(file.id) ? 0.55 : 1,
                       }}
                     >
                       <FileIcon mimeType={file.type} fileName={file.name} size={28} />
@@ -1416,27 +1675,43 @@ export default function PrivateChatView({
                           className="text-muted"
                           style={{ fontSize: "0.7rem" }}
                         >
-                          {formatSize(file.size)} · {file.fromName}
+                          {missingFileIds.has(file.id) ? (
+                            <span style={{ color: "var(--warning)" }}>Ya no disponible</span>
+                          ) : (
+                            <>{formatSize(file.size)} · {file.fromName}</>
+                          )}
                         </div>
                       </div>
-                      <a
-                        href={`/api/download-private/${file.id}`}
-                        target="_blank"
-                        className="btn btn-ghost btn-sm"
-                        style={{ padding: "6px 10px", flexShrink: 0 }}
-                        title="Descargar"
-                      >
-                        <svg
-                          width="14"
-                          height="14"
-                          fill="none"
-                          stroke="currentColor"
-                          strokeWidth="2"
-                          viewBox="0 0 24 24"
+                      {missingFileIds.has(file.id) ? (
+                        <button
+                          type="button"
+                          className="btn btn-ghost btn-sm"
+                          onClick={() => removeExpiredFile(file.id)}
+                          style={{ padding: "6px 10px", flexShrink: 0 }}
+                          title="Quitar del historial"
                         >
-                          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" />
-                        </svg>
-                      </a>
+                          Quitar
+                        </button>
+                      ) : (
+                        <a
+                          href={`/api/download-private/${file.id}`}
+                          target="_blank"
+                          className="btn btn-ghost btn-sm"
+                          style={{ padding: "6px 10px", flexShrink: 0 }}
+                          title="Descargar"
+                        >
+                          <svg
+                            width="14"
+                            height="14"
+                            fill="none"
+                            stroke="currentColor"
+                            strokeWidth="2"
+                            viewBox="0 0 24 24"
+                          >
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" />
+                          </svg>
+                        </a>
+                      )}
                     </div>
                   )}
                   <div
@@ -1559,7 +1834,7 @@ export default function PrivateChatView({
       {/* Input */}
       <form
         onSubmit={handleSubmit}
-        className="flex gap-2 items-end"
+        className="flex gap-2 items-end chat-input-bar"
         style={{
           padding: "0.75rem 1rem",
           borderTop: "1px solid var(--card-border)",
@@ -1567,6 +1842,11 @@ export default function PrivateChatView({
           position: "relative",
         }}
       >
+        {replyTo && (
+          <div className="reply-preview-wrap">
+            <ReplyPreview reply={replyTo} onCancel={() => setReplyTo(null)} />
+          </div>
+        )}
         {showSuggestions && slashInfo && (
           <FormatSuggestionsDropdown
             query={slashInfo.query}
@@ -1648,7 +1928,7 @@ export default function PrivateChatView({
         </button>
         <textarea
           ref={inputRef}
-          className="input no-scrollbar"
+          className="input no-scrollbar chat-input-textarea"
           style={{
             marginBottom: 0,
             flex: 1,
@@ -1657,7 +1937,6 @@ export default function PrivateChatView({
             resize: "none",
             padding: "10px",
             lineHeight: "1.4",
-            fontSize: "0.9rem",
             overflowY: "auto",
           }}
           value={text}
@@ -1694,8 +1973,16 @@ export default function PrivateChatView({
 
       {/* Context Menu */}
       {contextMenu && (() => {
-        const menuWidth = 130;
-        const menuHeight = contextMenu.targetType === "message" ? 85 : 45;
+        const targetMessage = contextMenu.targetType === "message"
+          ? messages.find((m) => m.id === contextMenu.messageId)
+          : undefined;
+        const targetIsMine = targetMessage ? targetMessage.fromId === currentUserId : false;
+        const showDelete = contextMenu.targetType === "file" || targetIsMine;
+        const menuWidth = 150;
+        const menuHeight =
+          contextMenu.targetType === "message"
+            ? 34 * (1 + (contextMenu.hasSelection ? 1 : 0) + (targetIsMine ? 2 : 0)) + 8
+            : 45;
         const menuX = typeof window !== "undefined" && contextMenu.x + menuWidth > window.innerWidth
           ? window.innerWidth - menuWidth - 10
           : contextMenu.x;
@@ -1722,7 +2009,67 @@ export default function PrivateChatView({
             }}
             onClick={(e) => e.stopPropagation()} // Prevent click through closing it immediately
           >
+            {contextMenu.targetType === "message" && contextMenu.hasSelection && (
+              <button
+                type="button"
+                onClick={() => {
+                  if (contextMenu.selectionReply) {
+                    setReplyTo(contextMenu.selectionReply);
+                    setContextMenu(null);
+                    inputRef.current?.focus({ preventScroll: true });
+                  }
+                }}
+                style={{
+                  background: "none",
+                  border: "none",
+                  color: "#fff",
+                  padding: "6px 12px",
+                  textAlign: "left",
+                  fontSize: "0.8rem",
+                  cursor: "pointer",
+                  borderRadius: "4px",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "8px",
+                }}
+                className="context-menu-item"
+              >
+                <svg width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                  <path d="M3 21c3 0 7-1 7-8V5c0-1.25-.756-2.017-2-2H4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2 1 0 1 0 1 1v1c0 1-1 2-2 2s-1 .008-1 1.031V20c0 1 0 1 1 1z" />
+                  <path d="M15 21c3 0 7-1 7-8V5c0-1.25-.757-2.017-2-2h-4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2h.75c0 2.25.25 4-2.75 4v3c0 1 0 1 1 1z" />
+                </svg>
+                Citar selección
+              </button>
+            )}
             {contextMenu.targetType === "message" && (
+              <button
+                type="button"
+                onClick={() => {
+                  if (targetMessage) startReply(targetMessage, false);
+                }}
+                style={{
+                  background: "none",
+                  border: "none",
+                  color: "#fff",
+                  padding: "6px 12px",
+                  textAlign: "left",
+                  fontSize: "0.8rem",
+                  cursor: "pointer",
+                  borderRadius: "4px",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "8px",
+                }}
+                className="context-menu-item"
+              >
+                <svg width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                  <polyline points="9 17 4 12 9 7" />
+                  <path d="M20 18v-2a4 4 0 0 0-4-4H4" />
+                </svg>
+                Responder
+              </button>
+            )}
+            {contextMenu.targetType === "message" && targetIsMine && (
               <button
                 type="button"
                 onClick={startEdit}
@@ -1748,6 +2095,7 @@ export default function PrivateChatView({
                 Editar
               </button>
             )}
+            {showDelete && (
             <button
               type="button"
               onClick={() => {
@@ -1775,6 +2123,7 @@ export default function PrivateChatView({
               </svg>
               Eliminar
             </button>
+            )}
           </div>
         );
       })()}

@@ -12,6 +12,13 @@ interface JoinRoomResponse {
   error?: string;
 }
 
+interface RoomTextsPageResponse {
+  texts: SharedText[];
+  hasMore: boolean;
+}
+
+const ROOM_PAGE_SIZE = 50;
+
 export function useRoom(
   socket: Socket | null,
   showModal: (title: string, message: string, type: "info" | "warning" | "error") => void,
@@ -22,13 +29,64 @@ export function useRoom(
   const [isGhost, setIsGhost] = useState(false);
   const [currentView, setCurrentView] = useState<"name" | "contacts" | "room">("name");
   const [showAdminPanel, setShowAdminPanel] = useState(false);
+  const [hasMoreTexts, setHasMoreTexts] = useState(false);
 
   useEffect(() => {
     if (!socket) return;
 
-    const handleRoomUpdated = (updatedRoom: Room) => {
-      setRoom(updatedRoom);
-      setCurrentView("room");
+    // Full snapshot on join/create/reconnect: replaces the room state
+    const handleRoomSnapshot = (snapshot: Room) => {
+      setRoom(snapshot);
+      setHasMoreTexts(snapshot.textsHasMore === true);
+    };
+
+    // Membership/metadata delta: keeps the already loaded messages
+    const handleRoomUpdated = (meta: Room) => {
+      setRoom((prev) => {
+        if (!prev || prev.id !== meta.id) return meta;
+        return { ...prev, ...meta, texts: prev.texts };
+      });
+    };
+
+    const handleNewText = (text: SharedText) => {
+      // The socket only receives `new_text` for rooms it belongs to, so the
+      // open room is the right target.
+      setRoom((prev) => {
+        if (!prev) return prev;
+        if (prev.texts.some((t) => t.id === text.id)) return prev;
+        return { ...prev, texts: [...prev.texts, text] };
+      });
+    };
+
+    const handleTextDeleted = ({ roomId, textId }: { roomId: string; textId: string }) => {
+      setRoom((prev) => {
+        if (!prev || prev.id !== roomId) return prev;
+        return { ...prev, texts: prev.texts.filter((t) => t.id !== textId) };
+      });
+    };
+
+    const handleRoomReadUpdated = ({
+      roomId,
+      userId,
+      messageIds,
+    }: {
+      roomId: string;
+      userId: string;
+      messageIds: string[];
+    }) => {
+      setRoom((prev) => {
+        if (!prev || prev.id !== roomId || !messageIds?.length) return prev;
+        const ids = new Set(messageIds);
+        return {
+          ...prev,
+          texts: prev.texts.map((t) => {
+            if (!ids.has(t.id)) return t;
+            const readBy = t.readBy ? [...t.readBy] : [];
+            if (!readBy.includes(userId)) readBy.push(userId);
+            return { ...t, readBy };
+          }),
+        };
+      });
     };
 
     const handleRoomClosed = () => {
@@ -60,8 +118,17 @@ export function useRoom(
       showModal("Has sido Bloqueado", "Has sido bloqueado de esta sala y no podrás volver a entrar.", "error");
     };
 
+    // The server took the identity to another session: drop room membership locally
+    const handleIdentityReplaced = () => {
+      setRoom(null);
+      setCurrentView("contacts");
+      setIsGhost(false);
+      localStorage.removeItem("wifi_sharer_room_id");
+      localStorage.removeItem("wifi_sharer_room_password");
+    };
+
     // Notifications for room messages
-    const handleNewText = (text: SharedText) => {
+    const handleNewTextNotification = (text: SharedText) => {
       if (text.senderId !== socket.id) {
         showBrowserNotification(
           `💬 ${text.senderName} (Sala)`,
@@ -96,19 +163,29 @@ export function useRoom(
       }
     };
 
+    socket.on("room_snapshot", handleRoomSnapshot);
     socket.on("room_updated", handleRoomUpdated);
+    socket.on("new_text", handleNewText);
+    socket.on("new_text", handleNewTextNotification);
+    socket.on("text_deleted", handleTextDeleted);
+    socket.on("room_read_updated", handleRoomReadUpdated);
     socket.on("room_closed", handleRoomClosed);
     socket.on("you_were_kicked", handleKicked);
     socket.on("you_were_banned", handleBanned);
-    socket.on("new_text", handleNewText);
+    socket.on("identity_replaced", handleIdentityReplaced);
     socket.on("file_uploaded", handleFileUploaded);
 
     return () => {
+      socket.off("room_snapshot", handleRoomSnapshot);
       socket.off("room_updated", handleRoomUpdated);
+      socket.off("new_text", handleNewText);
+      socket.off("new_text", handleNewTextNotification);
+      socket.off("text_deleted", handleTextDeleted);
+      socket.off("room_read_updated", handleRoomReadUpdated);
       socket.off("room_closed", handleRoomClosed);
       socket.off("you_were_kicked", handleKicked);
       socket.off("you_were_banned", handleBanned);
-      socket.off("new_text", handleNewText);
+      socket.off("identity_replaced", handleIdentityReplaced);
       socket.off("file_uploaded", handleFileUploaded);
     };
   }, [socket, showModal, currentView, onNewMessage, onToast]);
@@ -127,6 +204,7 @@ export function useRoom(
           (response: JoinRoomResponse) => {
             if (response.success && response.room) {
               setRoom(response.room);
+              setHasMoreTexts(response.room.textsHasMore === true);
               setCurrentView("room");
             } else {
               localStorage.removeItem("wifi_sharer_room_id");
@@ -150,6 +228,36 @@ export function useRoom(
     };
   }, [socket, showModal]);
 
+  /**
+   * Loads a page of older messages and prepends it to the current window.
+   */
+  const loadOlderTexts = useCallback((): Promise<void> => {
+    if (!socket || !room || !hasMoreTexts) return Promise.resolve();
+    const first = room.texts[0];
+    if (!first) return Promise.resolve();
+
+    return new Promise((resolve) => {
+      socket.emit(
+        "get_room_texts_page",
+        {
+          roomId: room.id,
+          before: { createdAt: first.createdAt, id: first.id },
+          limit: ROOM_PAGE_SIZE,
+        },
+        (res: RoomTextsPageResponse) => {
+          setRoom((prev) => {
+            if (!prev) return prev;
+            const existing = new Set(prev.texts.map((t) => t.id));
+            const older = (res.texts || []).filter((t) => !existing.has(t.id));
+            return older.length > 0 ? { ...prev, texts: [...older, ...prev.texts] } : prev;
+          });
+          setHasMoreTexts(res.hasMore === true);
+          resolve();
+        }
+      );
+    });
+  }, [socket, room, hasMoreTexts]);
+
   const handleRoomJoined = useCallback((roomId: string, password?: string) => {
     addRecentToStorage(roomId, password);
     setShowAdminPanel(false);
@@ -159,6 +267,7 @@ export function useRoom(
     setRoom(null);
     setCurrentView("contacts");
     setIsGhost(false);
+    setHasMoreTexts(false);
     localStorage.removeItem("wifi_sharer_room_id");
     localStorage.removeItem("wifi_sharer_room_password");
   }, []);
@@ -170,6 +279,7 @@ export function useRoom(
         socket.emit("join_room_ghost", { roomId }, (res: JoinRoomResponse) => {
           if (res.success) {
             setRoom(res.room ?? null);
+            setHasMoreTexts(res.room?.textsHasMore === true);
             setCurrentView("room");
             setIsGhost(true);
             setShowAdminPanel(false);
@@ -182,6 +292,7 @@ export function useRoom(
         socket.emit("join_room", { roomId, nickname, password: "" }, (res: JoinRoomResponse) => {
           if (res.success) {
             setRoom(res.room ?? null);
+            setHasMoreTexts(res.room?.textsHasMore === true);
             setCurrentView("room");
             setIsGhost(false);
             setShowAdminPanel(false);
@@ -207,6 +318,8 @@ export function useRoom(
     handleRoomJoined,
     handleRoomExited,
     handleAdminJoinRoom,
+    hasMoreTexts,
+    loadOlderTexts,
   };
 }
 

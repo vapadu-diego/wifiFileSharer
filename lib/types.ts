@@ -2,12 +2,13 @@ export interface User {
   id: string; // Socket ID
   nickname: string;
   roomId: string;
-  ip: string;
-  userAgent: string;
+  ip?: string;
+  userAgent?: string;
   os: string;
   browser: string;
   joinedAt: number;
   isGhost?: boolean; // Admin observing in ghost mode
+  persistentId?: string;
 }
 
 export interface SharedFile {
@@ -28,6 +29,7 @@ export interface SharedText {
   senderName: string;
   createdAt: number;
   readBy?: string[];
+  replyTo?: ReplyRef;
 }
 
 export interface RoomSettings {
@@ -39,12 +41,13 @@ export interface Room {
   password?: string;
   hostId: string;
   users: User[];
-  ghosts: User[]; // Admins observing in ghost mode
+  ghosts?: User[]; // Admins observing in ghost mode (server-only, never broadcast)
   files: SharedFile[];
   texts: SharedText[];
   settings: RoomSettings;
-  bannedIps: string[]; // Blocked IP addresses
+  bannedIps?: string[]; // Blocked IP addresses (server-only, never broadcast)
   createdAt: number;
+  textsHasMore?: boolean; // Wire-only: snapshot indicates older messages exist
 }
 
 // For admin panel - room info without sensitive data
@@ -67,6 +70,52 @@ export interface OnlineUser {
   isOnline?: boolean;
 }
 
+export interface ReplyRef {
+  id: string;
+  senderName: string;
+  snippet: string;
+  kind?: "text" | "code";
+  language?: string;
+  startLine?: number;
+  endLine?: number;
+  excerpt?: string;
+}
+
+const REPLY_SNIPPET_MAX = 200;
+const REPLY_EXCERPT_MAX = 400;
+
+export function sanitizeReplyRef(reply: unknown): ReplyRef | undefined {
+  if (!reply || typeof reply !== "object") return undefined;
+  const r = reply as Partial<ReplyRef>;
+  if (typeof r.id !== "string" || !r.id) return undefined;
+
+  const snippet = typeof r.snippet === "string" ? r.snippet.slice(0, REPLY_SNIPPET_MAX) : "";
+  const kind = r.kind === "code" ? "code" : "text";
+  const ref: ReplyRef = {
+    id: r.id,
+    senderName: typeof r.senderName === "string" ? r.senderName.slice(0, 50) : "",
+    snippet,
+    kind,
+  };
+
+  if (kind === "code") {
+    if (typeof r.language === "string" && r.language) {
+      ref.language = r.language.slice(0, 30);
+    }
+    const start = typeof r.startLine === "number" && r.startLine > 0 ? Math.floor(r.startLine) : undefined;
+    const end = typeof r.endLine === "number" && r.endLine > 0 ? Math.floor(r.endLine) : undefined;
+    if (start !== undefined) {
+      ref.startLine = start;
+      ref.endLine = end !== undefined && end >= start ? end : start;
+    }
+    if (typeof r.excerpt === "string" && r.excerpt) {
+      ref.excerpt = r.excerpt.slice(0, REPLY_EXCERPT_MAX);
+    }
+  }
+
+  return ref;
+}
+
 export interface PrivateMessage {
   id: string;
   fromId: string;
@@ -76,6 +125,7 @@ export interface PrivateMessage {
   createdAt: number;
   updatedAt?: number;
   readAt?: number;
+  replyTo?: ReplyRef;
 }
 
 export interface PrivateFile {

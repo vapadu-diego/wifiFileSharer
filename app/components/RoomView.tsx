@@ -2,13 +2,18 @@
 
 import { useState, useEffect, useLayoutEffect, useCallback, useRef } from "react";
 import { Socket } from "socket.io-client";
-import { Room } from "@/lib/types";
+import { Room, ReplyRef, SharedText } from "@/lib/types";
 import FileTab from "./FileTab";
 import TextTab from "./TextTab";
 import ParticipantsPanel from "./ParticipantsPanel";
 import FileIcon from "./FileIcon";
 import Modal from "./Modal";
 import FormattedMessage from "./FormattedMessage";
+import { ReplyQuote } from "./ReplyQuote";
+import { useSelectionCopy } from "../hooks/useSelectionCopy";
+import { ToastItem } from "../hooks/useToasts";
+import { buildMessageReply, buildSelectionReply, getSelectionNodes } from "@/lib/reply";
+import { useKeyboardInset } from "../hooks/useVisualViewportInset";
 
 interface RoomActionResponse {
   success: boolean;
@@ -21,6 +26,9 @@ interface RoomViewProps {
   currentUserId: string;
   isGhost?: boolean;
   onRoomExited?: () => void;
+  pushToast?: (toast: Omit<ToastItem, "id">, durationMs?: number) => void;
+  hasMoreTexts?: boolean;
+  onLoadOlderTexts?: () => Promise<void>;
 }
 
 // Clipboard fallback for HTTP
@@ -44,20 +52,31 @@ function copyToClipboard(text: string): Promise<void> {
   }
 }
 
-const PAGE_SIZE = 30;
-
 const formatTime = (ts: number) =>
   new Date(ts).toLocaleTimeString("es", { hour: "2-digit", minute: "2-digit" });
 
-export default function RoomView({ socket, room, currentUserId, isGhost = false, onRoomExited }: RoomViewProps) {
+export default function RoomView({
+  socket,
+  room,
+  currentUserId,
+  isGhost = false,
+  onRoomExited,
+  pushToast,
+  hasMoreTexts = false,
+  onLoadOlderTexts,
+}: RoomViewProps) {
+  useKeyboardInset();
   const [activeTab, setActiveTab] = useState<"files" | "texts">("texts");
+  const [replyTo, setReplyTo] = useState<ReplyRef | null>(null);
+  const [contextMenu, setContextMenu] = useState<{ x: number; y: number; messageId: string; hasSelection: boolean; selectionReply?: ReplyRef | null } | null>(null);
+  const contextMenuRef = useRef<HTMLDivElement>(null);
   const [showParticipants, setShowParticipants] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
-  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
   const [deleteModal, setDeleteModal] = useState<{ type: "file" | "text" | "exit" | "last_user_exit"; id?: string; name?: string } | null>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const isAtBottomRef = useRef(true);
   const enteredTabRef = useRef(false);
+  const loadingOlderRef = useRef(false);
   const settleTimerRef = useRef<number | null>(null);
   const [isAtBottom, setIsAtBottom] = useState(true);
   const [unseenCount, setUnseenCount] = useState(0);
@@ -68,7 +87,7 @@ export default function RoomView({ socket, room, currentUserId, isGhost = false,
   const lastReadEmitRef = useRef(0);
   const userScrollingRef = useRef(false);
 
-  const visibleMessages = room.texts.slice(-visibleCount);
+  const visibleMessages = room.texts;
 
   const handleMessagesScroll = (e: React.UIEvent<HTMLDivElement>) => {
     const container = e.currentTarget;
@@ -81,11 +100,16 @@ export default function RoomView({ socket, room, currentUserId, isGhost = false,
       if (atBottom) setUnseenCount(0);
     }
 
-    if (container.scrollTop === 0 && visibleCount < room.texts.length) {
+    // Reaching the top loads the previous page from the server
+    if (container.scrollTop === 0 && hasMoreTexts && !loadingOlderRef.current && onLoadOlderTexts) {
+      loadingOlderRef.current = true;
       const oldScrollHeight = container.scrollHeight;
-      setVisibleCount(prev => Math.min(prev + PAGE_SIZE, room.texts.length));
-      requestAnimationFrame(() => {
-        container.scrollTop = container.scrollHeight - oldScrollHeight;
+      Promise.resolve(onLoadOlderTexts()).finally(() => {
+        requestAnimationFrame(() => {
+          const c = messagesContainerRef.current;
+          if (c) c.scrollTop = c.scrollHeight - oldScrollHeight;
+          loadingOlderRef.current = false;
+        });
       });
     }
   };
@@ -246,7 +270,11 @@ export default function RoomView({ socket, room, currentUserId, isGhost = false,
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (e.key === "Escape") {
-        if (deleteModal) {
+        if (contextMenu) {
+          setContextMenu(null);
+        } else if (replyTo) {
+          setReplyTo(null);
+        } else if (deleteModal) {
           setDeleteModal(null);
         } else {
           confirmExit();
@@ -255,7 +283,7 @@ export default function RoomView({ socket, room, currentUserId, isGhost = false,
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [deleteModal, confirmExit]);
+  }, [deleteModal, confirmExit, contextMenu, replyTo]);
 
   const exitRoom = (keepRoomActive: boolean = false) => {
     // Emit leave_room event to server with the keep_active option
@@ -291,6 +319,113 @@ export default function RoomView({ socket, room, currentUserId, isGhost = false,
     });
   };
 
+  const flashMessage = useCallback((id: string) => {
+    if (highlightTimerRef.current) window.clearTimeout(highlightTimerRef.current);
+    setHighlightId(id);
+    highlightTimerRef.current = window.setTimeout(() => setHighlightId(null), 1700);
+  }, []);
+
+  const hasSelectionInBubble = (messageId: string): boolean => {
+    const selection = window.getSelection();
+    if (!selection || selection.isCollapsed) return false;
+    const bubble = document.getElementById(`msg-${messageId}`);
+    if (!bubble) return false;
+    const { anchorEl, focusEl } = getSelectionNodes(selection);
+    return !!anchorEl && !!focusEl && bubble.contains(anchorEl) && bubble.contains(focusEl);
+  };
+
+  const startReply = (messageId: string, senderName: string, content: string, useSelection = true) => {
+    let ref: ReplyRef | null = null;
+    if (useSelection && hasSelectionInBubble(messageId)) {
+      const selection = window.getSelection();
+      if (selection) {
+        ref = buildSelectionReply({ id: messageId, senderName }, selection);
+      }
+    }
+    if (!ref) ref = buildMessageReply(messageId, senderName, content);
+    setReplyTo(ref);
+    setContextMenu(null);
+  };
+
+  const focusQuotedMessage = (reply: ReplyRef, el: HTMLElement) => {
+    el.scrollIntoView({ behavior: "smooth", block: "center" });
+    flashMessage(reply.id);
+
+    if (reply.kind === "code" && reply.startLine) {
+      const start = reply.startLine;
+      const end = reply.endLine ?? start;
+      el.querySelectorAll<HTMLElement>(".code-line").forEach((lineEl) => {
+        const num = Number(lineEl.dataset.line);
+        if (num >= start && num <= end) {
+          lineEl.classList.add("code-line-flash");
+          window.setTimeout(() => lineEl.classList.remove("code-line-flash"), 1700);
+        }
+      });
+      const targetLine = el.querySelector<HTMLElement>(`.code-line[data-line="${start}"]`);
+      if (targetLine && el.scrollHeight > el.clientHeight) {
+        targetLine.scrollIntoView({ behavior: "smooth", block: "center" });
+      }
+    }
+  };
+
+  const jumpToMessage = (reply: ReplyRef) => {
+    // The quoted message may not be in the loaded window: load older pages
+    // until it appears (rooms are ephemeral and capped in memory).
+    let attempts = 0;
+    const tryLoad = () => {
+      const target = document.getElementById(`msg-${reply.id}`);
+      if (target) {
+        focusQuotedMessage(reply, target);
+        return;
+      }
+      if (attempts >= 5 || !hasMoreTexts) return;
+      attempts++;
+      Promise.resolve(onLoadOlderTexts?.()).finally(() => {
+        window.setTimeout(tryLoad, 60);
+      });
+    };
+    tryLoad();
+  };
+
+  const handleMessageContextMenu = (e: React.MouseEvent, item: SharedText) => {
+    e.preventDefault();
+    const MENU_WIDTH = 150;
+    const MENU_HEIGHT = 120;
+    const x = Math.max(10, Math.min(e.clientX, window.innerWidth - MENU_WIDTH - 10));
+    const y = Math.max(10, Math.min(e.clientY, window.innerHeight - MENU_HEIGHT - 10));
+
+    let selectionReply: ReplyRef | null = null;
+    if (hasSelectionInBubble(item.id)) {
+      const selection = window.getSelection();
+      if (selection) {
+        selectionReply = buildSelectionReply({ id: item.id, senderName: item.senderName }, selection);
+      }
+    }
+
+    setContextMenu({ x, y, messageId: item.id, hasSelection: !!selectionReply, selectionReply });
+  };
+
+  const handleSelectionCopied = useCallback(() => {
+    pushToast?.({ icon: "✅", title: "Texto copiado", variant: "light" }, 2000);
+  }, [pushToast]);
+
+  useSelectionCopy(messagesContainerRef, {
+    enabled: activeTab === "texts" && !isGhost,
+    onCopied: handleSelectionCopied,
+  });
+
+  // Close context menu on click anywhere
+  useEffect(() => {
+    const handleOuterClick = (e: MouseEvent) => {
+      if (contextMenuRef.current && contextMenuRef.current.contains(e.target as Node)) {
+        return;
+      }
+      setContextMenu(null);
+    };
+    window.addEventListener("click", handleOuterClick);
+    return () => window.removeEventListener("click", handleOuterClick);
+  }, []);
+
   const handleDeleteFile = (fileId: string) => {
     socket.emit("delete_file", { roomId: room.id, fileId }, (res: RoomActionResponse) => {
       if (!res.success) alert(res.error || "Error al eliminar archivo");
@@ -308,7 +443,7 @@ export default function RoomView({ socket, room, currentUserId, isGhost = false,
   const isImage = (type: string) => type.startsWith("image/");
 
   return (
-    <div className="flex w-full animate-fadeIn room-container" style={{ height: "calc(100vh - 2rem)", maxWidth: "100%", width: "100%" }}>
+    <div className="flex w-full animate-fadeIn room-container" style={{ height: "calc(100dvh - 2rem)", maxWidth: "100%", width: "100%", paddingBottom: "calc(var(--kb-inset, 0px) + env(safe-area-inset-bottom, 0px))" }}>
       {/* Main Content */}
       <div className="flex flex-col flex-1 card room-main" style={{ margin: "0", borderRadius: showParticipants ? "var(--radius-lg) 0 0 var(--radius-lg)" : "var(--radius-lg)", width: "100%" }}>
 
@@ -368,7 +503,7 @@ export default function RoomView({ socket, room, currentUserId, isGhost = false,
 
         {/* Tabs */}
         <div className="tabs mb-4">
-          <button className={`tab ${activeTab === "files" ? "active" : ""}`} onClick={() => setActiveTab("files")} style={{ display: "flex", alignItems: "center", gap: "8px", justifyContent: "center" }}>
+          <button className={`tab ${activeTab === "files" ? "active" : ""}`} onClick={() => { setActiveTab("files"); setReplyTo(null); setContextMenu(null); }} style={{ display: "flex", alignItems: "center", gap: "8px", justifyContent: "center" }}>
             <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24" style={{ flexShrink: 0 }}>
               <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
             </svg>
@@ -487,7 +622,10 @@ export default function RoomView({ socket, room, currentUserId, isGhost = false,
                 {visibleMessages.map((item) => (
                   <div
                     key={item.id}
+                    id={`msg-${item.id}`}
+                    data-message-id={item.id}
                     className={`message-bubble animate-slideUp ${highlightId === item.id ? "animate-message-flash" : ""}`}
+                    onContextMenu={(e) => handleMessageContextMenu(e, item)}
                     style={{
                       alignSelf: item.senderId === currentUserId ? "flex-end" : "flex-start",
                       background: item.senderId === currentUserId ? "rgba(168, 85, 247, 0.15)" : "rgba(255,255,255,0.03)",
@@ -523,6 +661,27 @@ export default function RoomView({ socket, room, currentUserId, isGhost = false,
                           </button>
                         )}
                         <button
+                          className="copy-btn copy-btn-hover"
+                          onClick={() => startReply(item.id, item.senderName, item.content)}
+                          title="Responder"
+                          style={{
+                            background: "rgba(255,255,255,0.05)",
+                            border: "none",
+                            borderRadius: "4px",
+                            cursor: "pointer",
+                            padding: "4px",
+                            display: "flex",
+                            alignItems: "center",
+                            justifyContent: "center",
+                            transition: "all 0.2s",
+                          }}
+                        >
+                          <svg width="12" height="12" fill="none" stroke="var(--muted)" strokeWidth="2" viewBox="0 0 24 24">
+                            <polyline points="9 17 4 12 9 7" />
+                            <path d="M20 18v-2a4 4 0 0 0-4-4H4" />
+                          </svg>
+                        </button>
+                        <button
                           className={`copy-btn copy-btn-hover ${copiedId === item.id ? "copied" : ""}`}
                           onClick={() => copyMessage(item.id, item.content)}
                           title="Copiar mensaje"
@@ -551,6 +710,9 @@ export default function RoomView({ socket, room, currentUserId, isGhost = false,
                         </button>
                       </div>
                     </div>
+                    {item.replyTo && (
+                      <ReplyQuote reply={item.replyTo} onJump={jumpToMessage} />
+                    )}
                     <div style={{ fontSize: "0.95rem", lineHeight: 1.5 }}><FormattedMessage content={item.content} /></div>
                     <div
                       className="text-muted"
@@ -648,7 +810,13 @@ export default function RoomView({ socket, room, currentUserId, isGhost = false,
 
               {/* Input (not for ghosts) */}
               {!isGhost && (
-                <TextTab socket={socket} roomId={room.id} senderName={currentUser?.nickname || "Anónimo"} />
+                <TextTab
+                  socket={socket}
+                  roomId={room.id}
+                  senderName={currentUser?.nickname || "Anónimo"}
+                  replyTo={replyTo}
+                  onCancelReply={() => setReplyTo(null)}
+                />
               )}
             </div>
           )}
@@ -665,6 +833,126 @@ export default function RoomView({ socket, room, currentUserId, isGhost = false,
         isOpen={showParticipants}
         onClose={() => setShowParticipants(false)}
       />
+
+      {/* Context Menu */}
+      {contextMenu && (() => {
+        const target = room.texts.find((t) => t.id === contextMenu.messageId);
+        if (!target) return null;
+        const menuWidth = 150;
+        const menuHeight = 34 * (1 + (contextMenu.hasSelection ? 1 : 0) + (isHost ? 1 : 0)) + 8;
+        const menuX = contextMenu.x + menuWidth > window.innerWidth
+          ? window.innerWidth - menuWidth - 10
+          : contextMenu.x;
+        const menuY = contextMenu.y + menuHeight > window.innerHeight
+          ? window.innerHeight - menuHeight - 10
+          : contextMenu.y;
+
+        return (
+          <div
+            ref={contextMenuRef}
+            style={{
+              position: "fixed",
+              top: menuY,
+              left: menuX,
+              zIndex: 9999,
+              background: "var(--card-bg, #1e1e2e)",
+              border: "1px solid var(--card-border, rgba(255,255,255,0.08))",
+              borderRadius: "6px",
+              boxShadow: "0 4px 12px rgba(0,0,0,0.5)",
+              padding: "4px",
+              display: "flex",
+              flexDirection: "column",
+              minWidth: "120px",
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {contextMenu.hasSelection && (
+              <button
+                type="button"
+                onClick={() => {
+                  if (contextMenu.selectionReply) {
+                    setReplyTo(contextMenu.selectionReply);
+                    setContextMenu(null);
+                  }
+                }}
+                className="context-menu-item"
+                style={{
+                  background: "none",
+                  border: "none",
+                  color: "#fff",
+                  padding: "6px 12px",
+                  textAlign: "left",
+                  fontSize: "0.8rem",
+                  cursor: "pointer",
+                  borderRadius: "4px",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "8px",
+                }}
+              >
+                <svg width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                  <path d="M3 21c3 0 7-1 7-8V5c0-1.25-.756-2.017-2-2H4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2 1 0 1 0 1 1v1c0 1-1 2-2 2s-1 .008-1 1.031V20c0 1 0 1 1 1z" />
+                  <path d="M15 21c3 0 7-1 7-8V5c0-1.25-.757-2.017-2-2h-4c-1.25 0-2 .75-2 1.972V11c0 1.25.75 2 2 2h.75c0 2.25.25 4-2.75 4v3c0 1 0 1 1 1z" />
+                </svg>
+                Citar selección
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={() => startReply(target.id, target.senderName, target.content, false)}
+              className="context-menu-item"
+              style={{
+                background: "none",
+                border: "none",
+                color: "#fff",
+                padding: "6px 12px",
+                textAlign: "left",
+                fontSize: "0.8rem",
+                cursor: "pointer",
+                borderRadius: "4px",
+                display: "flex",
+                alignItems: "center",
+                gap: "8px",
+              }}
+            >
+              <svg width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                <polyline points="9 17 4 12 9 7" />
+                <path d="M20 18v-2a4 4 0 0 0-4-4H4" />
+              </svg>
+              Responder
+            </button>
+            {isHost && (
+              <button
+                type="button"
+                onClick={() => {
+                  setDeleteModal({ type: "text", id: target.id });
+                  setContextMenu(null);
+                }}
+                className="context-menu-item danger"
+                style={{
+                  background: "none",
+                  border: "none",
+                  color: "var(--danger, #ef4444)",
+                  padding: "6px 12px",
+                  textAlign: "left",
+                  fontSize: "0.8rem",
+                  cursor: "pointer",
+                  borderRadius: "4px",
+                  display: "flex",
+                  alignItems: "center",
+                  gap: "8px",
+                }}
+              >
+                <svg width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                  <polyline points="3 6 5 6 21 6" />
+                  <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2" />
+                </svg>
+                Eliminar
+              </button>
+            )}
+          </div>
+        );
+      })()}
 
       {/* Delete/Exit Confirmation Modal */}
       {deleteModal && deleteModal.type === "last_user_exit" && (

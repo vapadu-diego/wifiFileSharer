@@ -1,24 +1,28 @@
 import { Server, Socket } from "socket.io";
 import fs from "fs";
-import { createRoom, joinRoom, joinRoomAsGhost, leaveRoom, addTextToRoom, getRoom, getAllRooms, kickUser, banUserIp, deleteRoom, removeFileFromRoom, removeTextFromRoom, updateUserSocketId, checkRoomsExist, markRoomTextsRead } from "./rooms";
-import { addUser, scheduleRemoveUser, cancelRemoveUser, getAllUsers, getPersistentId, getSocketId, addPrivateMessage, getConversation, getPrivateFiles, editPrivateMessage, deletePrivateMessage, deletePrivateFile, markConversationRead } from "./presence";
-import { User, SharedText, RoomSettings } from "./types";
+import { createRoom, joinRoom, joinRoomAsGhost, leaveRoom, addTextToRoom, getRoom, getAllRooms, kickUser, banUserIp, deleteRoom, removeFileFromRoom, removeTextFromRoom, updateUserSocketId, checkRoomsExist, markRoomTextsRead, serializeRoom, serializeRoomMeta, getRoomTextsPage, renameUserInRooms } from "./rooms";
+import { addUser, scheduleRemoveUser, cancelRemoveUser, getAllUsers, getPersistentId, getSocketId, getUser, renameUser } from "./presence";
+import { addPrivateMessage, getConversationPage, getConversationSince, getMessageContext, getPrivateFiles, getPrivateUpdatesSince, getUnreadCounts, importLocalMessages, editPrivateMessage, deletePrivateMessage, deletePrivateFile, markConversationRead } from "./privateChatRepo";
+import { User, SharedText, RoomSettings, sanitizeReplyRef } from "./types";
+import { registerIdentity, renameIdentity, isReservedNickname, isRegisteredIdentity, PERSISTENT_ID_REGEX } from "./identity";
+import { MAX_CONTENT_LENGTH, MAX_NICKNAME_LENGTH, RATE_LIMIT_MAX_EVENTS, RATE_LIMIT_WINDOW_MS } from "./limits";
 
 function parseUserAgent(ua: string): { os: string; browser: string } {
   let os = "Unknown";
   let browser = "Unknown";
 
+  // Order matters: Android UAs contain "Linux" and iOS UAs contain "Mac OS"
   if (ua.includes("Windows")) os = "Windows";
-  else if (ua.includes("Mac OS")) os = "macOS";
-  else if (ua.includes("Linux")) os = "Linux";
   else if (ua.includes("Android")) os = "Android";
   else if (ua.includes("iPhone") || ua.includes("iPad")) os = "iOS";
+  else if (ua.includes("Mac OS")) os = "macOS";
+  else if (ua.includes("Linux")) os = "Linux";
 
   if (ua.includes("Firefox")) browser = "Firefox";
   else if (ua.includes("Edg/")) browser = "Edge";
+  else if (ua.includes("OPR") || ua.includes("Opera")) browser = "Opera";
   else if (ua.includes("Chrome")) browser = "Chrome";
   else if (ua.includes("Safari")) browser = "Safari";
-  else if (ua.includes("Opera") || ua.includes("OPR")) browser = "Opera";
 
   return { os, browser };
 }
@@ -28,44 +32,216 @@ function isLocalhost(ip: string): boolean {
   return ip === "127.0.0.1" || ip === "::1" || ip === "::ffff:127.0.0.1";
 }
 
-export const setupSocket = (io: Server) => {
-  const lastTypingTs = new Map<string, number>();
+interface MessageCursor {
+  createdAt: number;
+  id: string;
+}
 
+function sanitizeCursor(value: unknown): MessageCursor | undefined {
+  if (!value || typeof value !== "object") return undefined;
+  const cursor = value as { createdAt?: unknown; id?: unknown };
+  if (typeof cursor.createdAt !== "number" || !Number.isFinite(cursor.createdAt)) return undefined;
+  if (typeof cursor.id !== "string" || !cursor.id) return undefined;
+  return { createdAt: cursor.createdAt, id: cursor.id };
+}
+
+export const setupSocket = (io: Server) => {
   io.on("connection", (socket: Socket) => {
     const clientIp = socket.handshake.address || "Unknown";
     const userAgent = socket.handshake.headers["user-agent"] || "";
     const { os, browser } = parseUserAgent(userAgent);
     const isAdmin = isLocalhost(clientIp);
 
+    // Per-connection state (released automatically when the socket dies)
+    const rateBuckets = new Map<string, { count: number; resetAt: number }>();
+    const typingTs = new Map<string, number>();
+
+    const allowEvent = (
+      kind: string,
+      limit: number = RATE_LIMIT_MAX_EVENTS,
+      windowMs: number = RATE_LIMIT_WINDOW_MS
+    ): boolean => {
+      const now = Date.now();
+      const bucket = rateBuckets.get(kind);
+      if (!bucket || now > bucket.resetAt) {
+        rateBuckets.set(kind, { count: 1, resetAt: now + windowMs });
+        return true;
+      }
+      if (bucket.count >= limit) return false;
+      bucket.count++;
+      return true;
+    };
+
+    type AckCallback = (res: unknown) => void;
+
+    /**
+     * Registers an event that always replies through a callback. Protects the
+     * server against malformed emissions (a missing/non-function callback used
+     * to crash the whole process) and reports internal errors to the client.
+     */
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const ackOn = (event: string, handler: (payload: any, callback: AckCallback) => void) => {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      socket.on(event, (payload: any, callback: unknown) => {
+        const reply: AckCallback = typeof callback === "function" ? (callback as AckCallback) : () => {};
+        try {
+          handler(payload, reply);
+        } catch (err) {
+          console.error(`Error handling "${event}":`, err);
+          reply({ success: false, error: "Error interno del servidor" });
+        }
+      });
+    };
+
     // Tell client if they are admin
     socket.emit("admin_status", { isAdmin });
 
-    socket.on("register_user", ({ nickname, persistentId }, callback) => {
+    ackOn("register_user", ({ nickname, persistentId, token }, callback) => {
+      if (typeof persistentId !== "string" || !PERSISTENT_ID_REGEX.test(persistentId)) {
+        callback({ success: false, error: "Identificador de usuario inválido" });
+        return;
+      }
+      if (typeof nickname !== "string" || !nickname.trim()) {
+        callback({ success: false, error: "Apodo inválido" });
+        return;
+      }
+      const cleanNickname = nickname.trim().slice(0, MAX_NICKNAME_LENGTH);
+
+      const identity = registerIdentity(
+        persistentId,
+        typeof token === "string" ? token : undefined,
+        cleanNickname
+      );
+      if (!identity.ok) {
+        callback({ success: false, error: identity.error });
+        return;
+      }
+
       const wasReconnect = cancelRemoveUser(persistentId);
-      const user = addUser(socket.id, persistentId, nickname, os, browser);
+      const displaced = getUser(persistentId);
+
+      if (displaced && displaced.id !== socket.id) {
+        const oldSocket = io.sockets.sockets.get(displaced.id);
+        if (oldSocket) {
+          oldSocket.emit("identity_replaced");
+          // Remove the displaced session from every room it was part of
+          for (const roomId of Array.from(oldSocket.rooms)) {
+            if (roomId === oldSocket.id) continue;
+            const room = leaveRoom(roomId, oldSocket.id);
+            if (room) {
+              io.to(roomId).emit("room_updated", serializeRoomMeta(room));
+            } else {
+              io.to(roomId).emit("room_closed");
+            }
+            oldSocket.leave(roomId);
+          }
+        }
+      }
+
+      // The displaced socket may have scheduled a removal timer for this identity
+      cancelRemoveUser(persistentId);
+
+      // The stored nickname always wins: it only changes via update_nickname
+      const user = addUser(socket.id, persistentId, identity.nickname, os, browser);
       const onlineUsers = getAllUsers();
 
-      if (wasReconnect) {
-        // Reconnection within grace period — notify others to update socketId
+      if (wasReconnect || displaced) {
+        // Reconnection or takeover — notify others to update socketId
         socket.broadcast.emit("user_reconnected", user);
       } else {
         // New user
         socket.broadcast.emit("user_online", user);
       }
 
-      callback({ success: true, user, onlineUsers });
+      callback({
+        success: true,
+        user,
+        onlineUsers,
+        token: identity.token,
+        unreadCounts: getUnreadCounts(persistentId),
+      });
+    });
+
+    // Change the display nickname. The new name must be free across the whole
+    // registry (case-insensitive) and cannot use the reserved ghost prefix.
+    ackOn("update_nickname", ({ nickname }, callback) => {
+      const myPersistentId = getPersistentId(socket.id);
+      if (!myPersistentId) {
+        callback({ success: false, error: "Usuario no registrado" });
+        return;
+      }
+      if (typeof nickname !== "string") {
+        callback({ success: false, error: "Nombre inválido" });
+        return;
+      }
+      const cleanNickname = nickname.trim().replace(/\s+/g, " ");
+      if (!cleanNickname || cleanNickname.length > MAX_NICKNAME_LENGTH) {
+        callback({
+          success: false,
+          error: `El nombre debe tener entre 1 y ${MAX_NICKNAME_LENGTH} caracteres`,
+        });
+        return;
+      }
+      if (isReservedNickname(cleanNickname)) {
+        callback({ success: false, error: "Ese nombre está reservado" });
+        return;
+      }
+      if (!allowEvent("nickname", 5, 60_000)) {
+        callback({ success: false, error: "Demasiados cambios de nombre, espera un minuto" });
+        return;
+      }
+
+      const result = renameIdentity(myPersistentId, cleanNickname);
+      if (!result.ok) {
+        callback({ success: false, error: result.error });
+        return;
+      }
+
+      const user = renameUser(myPersistentId, result.nickname);
+      const affectedRooms = renameUserInRooms(myPersistentId, result.nickname);
+
+      if (user) {
+        socket.broadcast.emit("user_updated", user);
+      }
+      for (const roomId of affectedRooms) {
+        const room = getRoom(roomId);
+        if (room) io.to(roomId).emit("room_updated", serializeRoomMeta(room));
+      }
+
+      callback({ success: true, user: user ?? null, nickname: result.nickname });
     });
 
     // Get all online users
     socket.on("get_online_users", (callback) => {
+      if (typeof callback !== "function") return;
+      if (!getPersistentId(socket.id)) {
+        callback({ onlineUsers: [] });
+        return;
+      }
       callback({ onlineUsers: getAllUsers() });
     });
 
     // Send a private message to another user
-    socket.on("send_private_message", ({ toId, content }, callback) => {
+    ackOn("send_private_message", ({ toId, content, replyTo }, callback) => {
       const myPersistentId = getPersistentId(socket.id);
       if (!myPersistentId) {
         callback({ success: false, error: "Usuario no registrado" });
+        return;
+      }
+      if (typeof toId !== "string" || !PERSISTENT_ID_REGEX.test(toId)) {
+        callback({ success: false, error: "Destinatario inválido" });
+        return;
+      }
+      if (typeof content !== "string" || !content.trim()) {
+        callback({ success: false, error: "Mensaje vacío" });
+        return;
+      }
+      if (content.length > MAX_CONTENT_LENGTH) {
+        callback({ success: false, error: "Mensaje demasiado largo" });
+        return;
+      }
+      if (!allowEvent("private_message")) {
+        callback({ success: false, error: "Demasiados mensajes seguidos, espera unos segundos" });
         return;
       }
       const fromUser = getAllUsers().find((u) => u.persistentId === myPersistentId);
@@ -74,7 +250,7 @@ export const setupSocket = (io: Server) => {
         return;
       }
       // Store with persistentIds
-      const msg = addPrivateMessage(myPersistentId, toId, fromUser.nickname, content);
+      const msg = addPrivateMessage(myPersistentId, toId, fromUser.nickname, content, sanitizeReplyRef(replyTo));
       // Route to target's current socket
       const targetSocketId = getSocketId(toId);
       if (targetSocketId) {
@@ -103,9 +279,9 @@ export const setupSocket = (io: Server) => {
       const myPersistentId = getPersistentId(socket.id);
       if (!myPersistentId || !toId) return;
       const now = Date.now();
-      const key = `p:${socket.id}:${toId}`;
-      if (now - (lastTypingTs.get(key) || 0) < 1500) return;
-      lastTypingTs.set(key, now);
+      const key = `p:${toId}`;
+      if (now - (typingTs.get(key) || 0) < 1500) return;
+      typingTs.set(key, now);
       const targetSocketId = getSocketId(toId);
       if (targetSocketId) {
         io.to(targetSocketId).emit("private_typing", { fromId: myPersistentId });
@@ -116,9 +292,9 @@ export const setupSocket = (io: Server) => {
     socket.on("room_typing", ({ roomId }) => {
       if (!roomId || !socket.rooms.has(roomId)) return;
       const now = Date.now();
-      const key = `r:${socket.id}`;
-      if (now - (lastTypingTs.get(key) || 0) < 1500) return;
-      lastTypingTs.set(key, now);
+      const key = `r:${roomId}`;
+      if (now - (typingTs.get(key) || 0) < 1500) return;
+      typingTs.set(key, now);
       const room = getRoom(roomId);
       const nickname = room?.users.find((u) => u.id === socket.id)?.nickname;
       if (!nickname || nickname.startsWith("👻")) return;
@@ -127,52 +303,85 @@ export const setupSocket = (io: Server) => {
 
     // Mark room messages as read (chat tab is open)
     socket.on("room_mark_read", ({ roomId, upToMessageId }) => {
-      if (!roomId || !upToMessageId) return;
-      const changed = markRoomTextsRead(roomId, socket.id, upToMessageId);
-      if (changed) {
-        io.to(roomId).emit("room_updated", getRoom(roomId));
+      if (!roomId || !upToMessageId || !socket.rooms.has(roomId)) return;
+      const changedIds = markRoomTextsRead(roomId, socket.id, upToMessageId);
+      if (changedIds.length > 0) {
+        io.to(roomId).emit("room_read_updated", {
+          roomId,
+          userId: socket.id,
+          messageIds: changedIds,
+        });
       }
     });
 
-    // Edit a private message
-    socket.on("edit_private_message", ({ id, toId, content }, callback) => {
+    // Paginated room history (older messages than the snapshot)
+    ackOn("get_room_texts_page", ({ roomId, before, limit }, callback) => {
+      const myPersistentId = getPersistentId(socket.id);
+      if (!myPersistentId || typeof roomId !== "string" || !socket.rooms.has(roomId)) {
+        callback({ texts: [], hasMore: false });
+        return;
+      }
+      callback(getRoomTextsPage(roomId, sanitizeCursor(before), typeof limit === "number" ? limit : undefined));
+    });
+
+    // Edit a private message (author only)
+    ackOn("edit_private_message", ({ id, toId, content }, callback) => {
       const myPersistentId = getPersistentId(socket.id);
       if (!myPersistentId) {
         callback({ success: false, error: "Usuario no registrado" });
         return;
       }
+      if (
+        typeof id !== "string" ||
+        typeof toId !== "string" ||
+        typeof content !== "string" ||
+        !content.trim() ||
+        content.length > MAX_CONTENT_LENGTH
+      ) {
+        callback({ success: false, error: "Datos de mensaje inválidos" });
+        return;
+      }
+      if (!allowEvent("edit_message")) {
+        callback({ success: false, error: "Demasiadas operaciones seguidas" });
+        return;
+      }
       const updatedMsg = editPrivateMessage(myPersistentId, toId, id, content);
+      if (!updatedMsg) {
+        callback({ success: false, error: "Solo puedes editar tus propios mensajes" });
+        return;
+      }
       const targetSocketId = getSocketId(toId);
       if (targetSocketId) {
         io.to(targetSocketId).emit("private_message_edited", {
           id,
           fromId: myPersistentId,
           content,
-          updatedAt: updatedMsg ? updatedMsg.updatedAt : Date.now(),
+          updatedAt: updatedMsg.updatedAt,
         });
       }
-      callback({
-        success: true,
-        message: updatedMsg || {
-          id,
-          fromId: myPersistentId,
-          toId,
-          fromName: "",
-          content,
-          createdAt: Date.now(),
-          updatedAt: Date.now(),
-        },
-      });
+      callback({ success: true, message: updatedMsg });
     });
 
-    // Delete a private message
-    socket.on("delete_private_message", ({ id, toId }, callback) => {
+    // Delete a private message (author only)
+    ackOn("delete_private_message", ({ id, toId }, callback) => {
       const myPersistentId = getPersistentId(socket.id);
       if (!myPersistentId) {
         callback({ success: false, error: "Usuario no registrado" });
         return;
       }
-      deletePrivateMessage(myPersistentId, toId, id);
+      if (typeof id !== "string" || typeof toId !== "string") {
+        callback({ success: false, error: "Datos inválidos" });
+        return;
+      }
+      if (!allowEvent("delete_message")) {
+        callback({ success: false, error: "Demasiadas operaciones seguidas" });
+        return;
+      }
+      const deleted = deletePrivateMessage(myPersistentId, toId, id);
+      if (!deleted) {
+        callback({ success: false, error: "Solo puedes eliminar tus propios mensajes" });
+        return;
+      }
       const targetSocketId = getSocketId(toId);
       if (targetSocketId) {
         io.to(targetSocketId).emit("private_message_deleted", {
@@ -183,15 +392,23 @@ export const setupSocket = (io: Server) => {
       callback({ success: true });
     });
 
-    // Delete a private file
-    socket.on("delete_private_file", ({ id, toId }, callback) => {
+    // Delete a private file (sender only)
+    ackOn("delete_private_file", ({ id, toId }, callback) => {
       const myPersistentId = getPersistentId(socket.id);
       if (!myPersistentId) {
         callback({ success: false, error: "Usuario no registrado" });
         return;
       }
+      if (typeof id !== "string" || typeof toId !== "string") {
+        callback({ success: false, error: "Datos inválidos" });
+        return;
+      }
       const removed = deletePrivateFile(myPersistentId, toId, id);
-      if (removed && removed.path && fs.existsSync(removed.path)) {
+      if (!removed) {
+        callback({ success: false, error: "Solo puedes eliminar archivos que enviaste" });
+        return;
+      }
+      if (removed.path && fs.existsSync(removed.path)) {
         try {
           fs.unlinkSync(removed.path);
         } catch {
@@ -208,50 +425,95 @@ export const setupSocket = (io: Server) => {
       callback({ success: true });
     });
 
-    // Get conversation history with a specific user
-    socket.on("get_private_messages", ({ withUserId }, callback) => {
-      const myPersistentId = getPersistentId(socket.id);
-      if (!myPersistentId) { callback({ messages: [] }); return; }
-      const messages = getConversation(myPersistentId, withUserId);
-      callback({ messages });
-    });
-
     // Get private files shared in a conversation
-    socket.on("get_private_files", ({ withUserId }, callback) => {
+    ackOn("get_private_files", ({ withUserId }, callback) => {
       const myPersistentId = getPersistentId(socket.id);
       if (!myPersistentId) { callback({ files: [] }); return; }
       const files = getPrivateFiles(myPersistentId, withUserId);
       callback({ files });
     });
 
-    // P2P Synchronization events for chat history persistence (Option 3)
-    socket.on("private_sync_ping", ({ toSocketId, fromUserId, lastTimestamp }) => {
-      io.to(toSocketId).emit("private_sync_ping", { fromSocketId: socket.id, fromUserId, lastTimestamp });
-    });
-
-    socket.on("private_sync_data", ({ toSocketId, fromUserId, messages, files }) => {
-      io.to(toSocketId).emit("private_sync_data", { fromUserId, messages, files });
-    });
-
-    // Incremental sync: get messages since a timestamp
-    socket.on("get_private_messages_since", ({ withUserId, since }, callback) => {
+    // Paginated conversation history (server is the source of truth)
+    ackOn("get_private_messages_page", ({ withUserId, before, after, limit }, callback) => {
       const myPersistentId = getPersistentId(socket.id);
-      if (!myPersistentId) { callback({ messages: [] }); return; }
-      const allMessages = getConversation(myPersistentId, withUserId);
-      const newMessages = allMessages.filter(m => m.createdAt > since);
-      callback({ messages: newMessages });
+      if (!myPersistentId || typeof withUserId !== "string") {
+        callback({ messages: [], hasMore: false });
+        return;
+      }
+      const result = getConversationPage(myPersistentId, withUserId, {
+        before: sanitizeCursor(before),
+        after: sanitizeCursor(after),
+        limit: typeof limit === "number" ? limit : undefined,
+      });
+      callback(result);
     });
 
-    // Incremental sync: get files since a timestamp
-    socket.on("get_private_files_since", ({ withUserId, since }, callback) => {
+    // Page around a specific message (used to jump to a quoted message)
+    ackOn("get_private_message_context", ({ withUserId, messageId, limit }, callback) => {
       const myPersistentId = getPersistentId(socket.id);
-      if (!myPersistentId) { callback({ files: [] }); return; }
-      const allFiles = getPrivateFiles(myPersistentId, withUserId);
-      const newFiles = allFiles.filter(f => f.createdAt > since);
-      callback({ files: newFiles });
+      if (!myPersistentId || typeof withUserId !== "string" || typeof messageId !== "string") {
+        callback({ messages: [], hasMoreBefore: false, hasMoreAfter: false });
+        return;
+      }
+      const result = getMessageContext(myPersistentId, withUserId, messageId, limit);
+      callback(result ?? { messages: [], hasMoreBefore: false, hasMoreAfter: false });
     });
 
-    socket.on("create_room", ({ nickname, password, maxFileSize, customId }, callback) => {
+    // Incremental sync: get messages since a timestamp (gap fill on reconnect)
+    ackOn("get_private_messages_since", ({ withUserId, since }, callback) => {
+      const myPersistentId = getPersistentId(socket.id);
+      if (!myPersistentId || typeof withUserId !== "string") { callback({ messages: [] }); return; }
+      const sinceTs = typeof since === "number" && Number.isFinite(since) ? since : 0;
+      callback({ messages: getConversationSince(myPersistentId, withUserId, sinceTs) });
+    });
+
+    // One-time import of legacy local history (own messages only)
+    ackOn("import_local_messages", ({ withUserId, messages }, callback) => {
+      const myPersistentId = getPersistentId(socket.id);
+      if (!myPersistentId || typeof withUserId !== "string" || !isRegisteredIdentity(withUserId)) {
+        callback({ success: false, imported: 0, error: "Destinatario desconocido" });
+        return;
+      }
+      if (!allowEvent("import_messages", 5, 60_000)) {
+        callback({ success: false, imported: 0, error: "Demasiadas importaciones seguidas" });
+        return;
+      }
+      const imported = importLocalMessages(myPersistentId, withUserId, messages);
+      callback({ success: true, imported });
+    });
+
+    // Unread counters (used after a page reload)
+    ackOn("get_private_unread_counts", (_payload, callback) => {
+      const myPersistentId = getPersistentId(socket.id);
+      if (!myPersistentId) { callback({ counts: {} }); return; }
+      callback({ counts: getUnreadCounts(myPersistentId) });
+    });
+
+    // Reconcile edits/deletions made while this participant was offline
+    ackOn("get_private_updates_since", ({ withUserId, since }, callback) => {
+      const myPersistentId = getPersistentId(socket.id);
+      if (!myPersistentId || typeof withUserId !== "string") {
+        callback({ updated: [], deleted: [] });
+        return;
+      }
+      const sinceTs = typeof since === "number" && Number.isFinite(since) ? since : 0;
+      callback(getPrivateUpdatesSince(myPersistentId, withUserId, sinceTs));
+    });
+
+    ackOn("create_room", ({ nickname, password, maxFileSize, customId }, callback) => {
+      const myPersistentId = getPersistentId(socket.id);
+      if (!myPersistentId) {
+        callback({ success: false, error: "Usuario no registrado" });
+        return;
+      }
+      if (typeof nickname !== "string" || !nickname.trim()) {
+        callback({ success: false, error: "Apodo inválido" });
+        return;
+      }
+      if (!allowEvent("room_action", 10, 30_000)) {
+        callback({ success: false, error: "Demasiadas operaciones seguidas" });
+        return;
+      }
       const settings: Partial<RoomSettings> = {};
       if (maxFileSize) settings.maxFileSize = maxFileSize;
 
@@ -260,36 +522,52 @@ export const setupSocket = (io: Server) => {
 
         const user: User = {
           id: socket.id,
-          nickname,
+          nickname: nickname.trim().slice(0, MAX_NICKNAME_LENGTH),
           roomId: room.id,
           ip: clientIp,
           userAgent,
           os,
           browser,
           joinedAt: Date.now(),
+          persistentId: myPersistentId,
         };
 
         joinRoom(room.id, user, password);
         socket.join(room.id);
 
         callback({ success: true, roomId: room.id });
-        io.to(room.id).emit("room_updated", getRoom(room.id));
+        const created = getRoom(room.id);
+        if (created) io.to(room.id).emit("room_snapshot", serializeRoom(created));
       } catch (error: unknown) {
         const errorMsg = error instanceof Error ? error.message : "Error al crear sala";
         callback({ success: false, error: errorMsg });
       }
     });
 
-    socket.on("join_room", ({ roomId, nickname, password }, callback) => {
+    ackOn("join_room", ({ roomId, nickname, password }, callback) => {
+      const myPersistentId = getPersistentId(socket.id);
+      if (!myPersistentId) {
+        callback({ success: false, error: "Usuario no registrado" });
+        return;
+      }
+      if (typeof roomId !== "string" || !roomId) {
+        callback({ success: false, error: "Sala inválida" });
+        return;
+      }
+      if (typeof nickname !== "string" || !nickname.trim()) {
+        callback({ success: false, error: "Apodo inválido" });
+        return;
+      }
       const user: User = {
         id: socket.id,
-        nickname,
+        nickname: nickname.trim().slice(0, MAX_NICKNAME_LENGTH),
         roomId,
         ip: clientIp,
         userAgent,
         os,
         browser,
         joinedAt: Date.now(),
+        persistentId: myPersistentId,
       };
 
       const result = joinRoom(roomId, user, password);
@@ -297,15 +575,22 @@ export const setupSocket = (io: Server) => {
       if (result.success) {
         socket.join(roomId);
         const room = getRoom(roomId);
-        callback({ success: true, room });
-        io.to(roomId).emit("room_updated", room);
+        if (room) {
+          const snapshot = serializeRoom(room);
+          callback({ success: true, room: snapshot });
+          // The joiner gets the full snapshot; existing members only need meta
+          socket.emit("room_snapshot", snapshot);
+          socket.to(roomId).emit("room_updated", serializeRoomMeta(room));
+        } else {
+          callback({ success: true, room: undefined });
+        }
       } else {
         callback({ success: false, error: result.error });
       }
     });
 
     // Admin: Join room as ghost (invisible observer)
-    socket.on("join_room_ghost", ({ roomId }, callback) => {
+    ackOn("join_room_ghost", ({ roomId }, callback) => {
       if (!isAdmin) {
         callback({ success: false, error: "No autorizado" });
         return;
@@ -327,7 +612,7 @@ export const setupSocket = (io: Server) => {
 
       if (result.success) {
         socket.join(roomId);
-        callback({ success: true, room: result.room });
+        callback({ success: true, room: result.room ? serializeRoom(result.room) : undefined });
         // Don't broadcast room_updated to hide ghost
       } else {
         callback({ success: false, error: result.error });
@@ -336,6 +621,7 @@ export const setupSocket = (io: Server) => {
 
     // Admin: Get all active rooms
     socket.on("get_all_rooms", (callback) => {
+      if (typeof callback !== "function") return;
       if (!isAdmin) {
         callback({ success: false, error: "No autorizado" });
         return;
@@ -344,7 +630,7 @@ export const setupSocket = (io: Server) => {
     });
 
     // Host: Kick user from room
-    socket.on("kick_user", ({ roomId, targetUserId }, callback) => {
+    ackOn("kick_user", ({ roomId, targetUserId }, callback) => {
       const room = getRoom(roomId);
       if (!room || room.hostId !== socket.id) {
         callback({ success: false, error: "No autorizado" });
@@ -358,7 +644,8 @@ export const setupSocket = (io: Server) => {
         if (targetSocket) {
           targetSocket.leave(roomId);
         }
-        io.to(roomId).emit("room_updated", getRoom(roomId));
+        const updated = getRoom(roomId);
+        if (updated) io.to(roomId).emit("room_updated", serializeRoomMeta(updated));
         callback({ success: true });
       } else {
         callback({ success: false, error: "Usuario no encontrado" });
@@ -366,16 +653,18 @@ export const setupSocket = (io: Server) => {
     });
 
     // Host: Ban user IP from room
-    socket.on("ban_user", ({ roomId, targetUserId, targetIp }, callback) => {
+    ackOn("ban_user", ({ roomId, targetUserId }, callback) => {
       const room = getRoom(roomId);
       if (!room || room.hostId !== socket.id) {
         callback({ success: false, error: "No autorizado" });
         return;
       }
 
+      // Resolve the IP server-side; never trust a client-provided address
+      const target = room.users.find((u) => u.id === targetUserId);
       const kickResult = kickUser(roomId, targetUserId);
-      if (targetIp) {
-        banUserIp(roomId, targetIp);
+      if (target?.ip) {
+        banUserIp(roomId, target.ip);
       }
 
       if (kickResult.success) {
@@ -384,7 +673,8 @@ export const setupSocket = (io: Server) => {
         if (targetSocket) {
           targetSocket.leave(roomId);
         }
-        io.to(roomId).emit("room_updated", getRoom(roomId));
+        const updated = getRoom(roomId);
+        if (updated) io.to(roomId).emit("room_updated", serializeRoomMeta(updated));
         callback({ success: true });
       } else {
         callback({ success: false });
@@ -392,7 +682,7 @@ export const setupSocket = (io: Server) => {
     });
 
     // Admin: Close room forcefully
-    socket.on("admin_close_room", ({ roomId }, callback) => {
+    ackOn("admin_close_room", ({ roomId }, callback) => {
       if (!isAdmin) {
         callback({ success: false, error: "No autorizado" });
         return;
@@ -410,7 +700,7 @@ export const setupSocket = (io: Server) => {
     });
 
     // Host: Delete file
-    socket.on("delete_file", ({ roomId, fileId }, callback) => {
+    ackOn("delete_file", ({ roomId, fileId }, callback) => {
       const room = getRoom(roomId);
       if (!room || room.hostId !== socket.id) {
         callback({ success: false, error: "No autorizado" });
@@ -419,7 +709,8 @@ export const setupSocket = (io: Server) => {
 
       const success = removeFileFromRoom(roomId, fileId);
       if (success) {
-        io.to(roomId).emit("room_updated", getRoom(roomId));
+        const updated = getRoom(roomId);
+        if (updated) io.to(roomId).emit("room_updated", serializeRoomMeta(updated));
         callback({ success: true });
       } else {
         callback({ success: false, error: "Archivo no encontrado" });
@@ -427,7 +718,7 @@ export const setupSocket = (io: Server) => {
     });
 
     // Host: Delete text
-    socket.on("delete_text", ({ roomId, textId }, callback) => {
+    ackOn("delete_text", ({ roomId, textId }, callback) => {
       const room = getRoom(roomId);
       if (!room || room.hostId !== socket.id) {
         callback({ success: false, error: "No autorizado" });
@@ -436,14 +727,29 @@ export const setupSocket = (io: Server) => {
 
       const success = removeTextFromRoom(roomId, textId);
       if (success) {
-        io.to(roomId).emit("room_updated", getRoom(roomId));
+        io.to(roomId).emit("text_deleted", { roomId, textId });
         callback({ success: true });
       } else {
         callback({ success: false, error: "Mensaje no encontrado" });
       }
     });
 
-    socket.on("send_text", ({ roomId, content, senderName }) => {
+    socket.on("send_text", ({ roomId, content, replyTo }) => {
+      const myPersistentId = getPersistentId(socket.id);
+      if (!myPersistentId || typeof roomId !== "string" || typeof content !== "string") return;
+      if (!socket.rooms.has(roomId)) return;
+      if (!content.trim() || content.length > MAX_CONTENT_LENGTH) return;
+      if (!allowEvent("room_text")) return;
+
+      const room = getRoom(roomId);
+      if (!room) return;
+
+      // Sender identity always comes from server-side state
+      const member = room.users.find((u) => u.id === socket.id);
+      const ghost = (room.ghosts ?? []).find((g) => g.id === socket.id);
+      const senderName = member?.nickname || ghost?.nickname;
+      if (!senderName) return;
+
       const text: SharedText = {
         id: Math.random().toString(36).substr(2, 9),
         content,
@@ -451,20 +757,21 @@ export const setupSocket = (io: Server) => {
         senderName,
         createdAt: Date.now(),
       };
+      const reply = sanitizeReplyRef(replyTo);
+      if (reply) text.replyTo = reply;
       addTextToRoom(roomId, text);
+      // Messages travel as a delta: the full room is not rebroadcast
       io.to(roomId).emit("new_text", text);
-      const room = getRoom(roomId);
-      if (room) io.to(roomId).emit("room_updated", room);
     });
 
     // User voluntarily leaves room
-    socket.on("leave_room", ({ roomId, keepActive }, callback) => {
+    ackOn("leave_room", ({ roomId, keepActive }, callback) => {
       const room = leaveRoom(roomId, socket.id, keepActive === true);
       socket.leave(roomId);
       
       if (room) {
         // Room still exists, notify other users
-        io.to(roomId).emit("room_updated", room);
+        io.to(roomId).emit("room_updated", serializeRoomMeta(room));
         callback({ success: true });
       } else {
         // Room was deleted (no users left and not kept active)
@@ -474,13 +781,26 @@ export const setupSocket = (io: Server) => {
     });
 
     // Check which rooms from a list still exist (for recent rooms feature)
-    socket.on("check_rooms_exist", ({ roomIds }, callback) => {
-      const activeRooms = checkRoomsExist(roomIds || []);
+    ackOn("check_rooms_exist", ({ roomIds }, callback) => {
+      if (!getPersistentId(socket.id)) {
+        callback({ activeRooms: [] });
+        return;
+      }
+      const activeRooms = checkRoomsExist(Array.isArray(roomIds) ? roomIds : []);
       callback({ activeRooms });
     });
 
     // Reconnect to an existing room after page refresh
-    socket.on("reconnect_to_room", ({ roomId, nickname, password }, callback) => {
+    ackOn("reconnect_to_room", ({ roomId, nickname, password }, callback) => {
+      const myPersistentId = getPersistentId(socket.id);
+      if (!myPersistentId) {
+        callback({ success: false, error: "Usuario no registrado" });
+        return;
+      }
+      if (typeof roomId !== "string" || !roomId) {
+        callback({ success: false, error: "Sala inválida" });
+        return;
+      }
       const room = getRoom(roomId);
       
       if (!room) {
@@ -489,7 +809,7 @@ export const setupSocket = (io: Server) => {
       }
 
       // Check if IP is banned
-      if (room.bannedIps.includes(clientIp)) {
+      if ((room.bannedIps ?? []).includes(clientIp)) {
         callback({ success: false, error: "Has sido bloqueado de esta sala" });
         return;
       }
@@ -500,17 +820,19 @@ export const setupSocket = (io: Server) => {
         return;
       }
 
-      // Check if user with this nickname exists in the room
-      const existingUser = room.users.find((u) => u.nickname === nickname);
+      // Identity match takes precedence over the nickname (B7)
+      const existingUser = room.users.find((u) => u.persistentId === myPersistentId);
       
       if (existingUser) {
         // User was in the room, update their socket ID
-        const result = updateUserSocketId(roomId, socket.id, nickname);
+        const result = updateUserSocketId(roomId, socket.id, myPersistentId);
         
         if (result.success && result.room) {
           socket.join(roomId);
-          callback({ success: true, room: result.room });
-          io.to(roomId).emit("room_updated", result.room);
+          const snapshot = serializeRoom(result.room);
+          callback({ success: true, room: snapshot });
+          socket.emit("room_snapshot", snapshot);
+          socket.to(roomId).emit("room_updated", serializeRoomMeta(result.room));
         } else {
           callback({ success: false, error: result.error || "Error al reconectar" });
         }
@@ -518,13 +840,14 @@ export const setupSocket = (io: Server) => {
         // User was not in the room, treat as new join
         const user: User = {
           id: socket.id,
-          nickname,
+          nickname: (typeof nickname === "string" && nickname.trim() ? nickname.trim() : "Anónimo").slice(0, MAX_NICKNAME_LENGTH),
           roomId,
           ip: clientIp,
           userAgent,
           os,
           browser,
           joinedAt: Date.now(),
+          persistentId: myPersistentId,
         };
 
         const joinResult = joinRoom(roomId, user, password);
@@ -532,8 +855,14 @@ export const setupSocket = (io: Server) => {
         if (joinResult.success) {
           socket.join(roomId);
           const updatedRoom = getRoom(roomId);
-          callback({ success: true, room: updatedRoom });
-          io.to(roomId).emit("room_updated", updatedRoom);
+          if (updatedRoom) {
+            const snapshot = serializeRoom(updatedRoom);
+            callback({ success: true, room: snapshot });
+            socket.emit("room_snapshot", snapshot);
+            socket.to(roomId).emit("room_updated", serializeRoomMeta(updatedRoom));
+          } else {
+            callback({ success: false, error: "Error al reconectar" });
+          }
         } else {
           callback({ success: false, error: joinResult.error });
         }
@@ -552,7 +881,7 @@ export const setupSocket = (io: Server) => {
         if (roomId !== socket.id) {
           const room = leaveRoom(roomId, socket.id);
           if (room) {
-            io.to(roomId).emit("room_updated", room);
+            io.to(roomId).emit("room_updated", serializeRoomMeta(room));
           } else {
             io.to(roomId).emit("room_closed");
           }

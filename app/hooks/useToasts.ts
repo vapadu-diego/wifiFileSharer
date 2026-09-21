@@ -7,8 +7,9 @@ export interface ToastItem {
   id: number;
   icon: string;
   title: string;
-  body: string;
+  body?: string;
   user?: OnlineUser;
+  variant?: "dark" | "light";
 }
 
 export function useToasts() {
@@ -18,11 +19,14 @@ export function useToasts() {
     setToasts((prev) => prev.filter((t) => t.id !== id));
   }, []);
 
-  const pushToast = useCallback((toast: Omit<ToastItem, "id">) => {
-    const id = Date.now() + Math.random();
-    setToasts((prev) => [...prev, { ...toast, id }].slice(-4));
-    setTimeout(() => dismiss(id), 5000);
-  }, [dismiss]);
+  const pushToast = useCallback(
+    (toast: Omit<ToastItem, "id">, durationMs = 5000) => {
+      const id = Date.now() + Math.random();
+      setToasts((prev) => [...prev, { ...toast, id }].slice(-4));
+      setTimeout(() => dismiss(id), durationMs);
+    },
+    [dismiss]
+  );
 
   return { toasts, pushToast, dismiss };
 }

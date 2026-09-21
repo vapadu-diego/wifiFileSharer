@@ -5,11 +5,13 @@ import { OnlineUser } from "@/lib/types";
 
 interface OnlineContactsViewProps {
   myNickname: string;
+  myPersistentId: string;
   onlineUsers: OnlineUser[];
   unreadCounts: Record<string, number>;
   onStartChat: (user: OnlineUser) => void;
   onCreateRoom: () => void;
   onJoinRoom: () => void;
+  onEditNickname?: () => void;
   isAdmin?: boolean;
   showAdminPanel?: boolean;
   onToggleAdminPanel?: () => void;
@@ -29,17 +31,19 @@ function DeviceIcon({ os }: { os: string }) {
 
 export default function OnlineContactsView({
   myNickname,
+  myPersistentId,
   onlineUsers,
   unreadCounts,
   onStartChat,
   onCreateRoom,
   onJoinRoom,
+  onEditNickname,
   isAdmin,
   showAdminPanel,
   onToggleAdminPanel,
   children,
 }: OnlineContactsViewProps) {
-  const filtered = onlineUsers.filter((u) => u.nickname !== myNickname);
+  const filtered = onlineUsers.filter((u) => u.persistentId !== myPersistentId);
 
   return (
     <div
@@ -80,6 +84,19 @@ export default function OnlineContactsView({
         </div>
 
         <div className="flex gap-1">
+          {onEditNickname && (
+            <button
+              className="btn btn-ghost btn-icon"
+              onClick={onEditNickname}
+              title="Cambiar nombre"
+              style={{ width: "34px", height: "34px", padding: 0 }}
+            >
+              <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                <path d="M18.5 2.5a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4z" />
+              </svg>
+            </button>
+          )}
           {isAdmin && onToggleAdminPanel && (
             <button
               className="btn btn-ghost btn-icon"

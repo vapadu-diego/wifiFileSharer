@@ -38,6 +38,7 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.startServer = startServer;
 const http_1 = require("http");
+const https_1 = require("https");
 const url_1 = require("url");
 const next_1 = __importDefault(require("next"));
 const express_1 = __importDefault(require("express"));
@@ -48,70 +49,158 @@ const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
 const socket_1 = require("./lib/socket");
 const rooms_1 = require("./lib/rooms");
+const privateChatRepo_1 = require("./lib/privateChatRepo");
 const presence_1 = require("./lib/presence");
-const isDist = __dirname.endsWith("dist");
-const dev = process.env.NODE_ENV === "development" || (!isDist && process.env.NODE_ENV !== "production");
+const identity_1 = require("./lib/identity");
+const db_1 = require("./lib/db");
+const paths_1 = require("./lib/paths");
+const config_1 = require("./lib/config");
+const tls_1 = require("./lib/tls");
+const limits_1 = require("./lib/limits");
+function getRequestIdentity(req) {
+    const headerToken = req.headers["x-auth-token"];
+    const queryToken = req.query.token;
+    const cookieToken = getCookie(req.headers.cookie, "wfs_token");
+    const token = (typeof headerToken === "string" ? headerToken : undefined) ||
+        (typeof queryToken === "string" ? queryToken : undefined) ||
+        cookieToken;
+    if (!token)
+        return undefined;
+    return (0, identity_1.verifyTokenSelf)(token);
+}
+function getCookie(header, name) {
+    if (!header)
+        return undefined;
+    const match = header.match(new RegExp(`(?:^|;\\s*)${name}=([^;]*)`));
+    return match ? decodeURIComponent(match[1]) : undefined;
+}
+function findRoomMember(roomId, persistentId) {
+    const room = (0, rooms_1.getRoom)(roomId);
+    if (!room)
+        return undefined;
+    const member = room.users.find((u) => u.persistentId === persistentId);
+    if (!member)
+        return undefined;
+    return { room, member };
+}
 async function startServer(options) {
+    (0, config_1.checkNodeVersion)();
+    // CLI --data-dir must win over legacy detection
+    if (options.dataDir) {
+        process.env.WFS_DATA_DIR = path_1.default.resolve(options.dataDir);
+    }
     let { port } = options;
     const { hostname } = options;
     // Ensure we find the Next.js app directory correctly
     // In dev (server.ts), it's the current dir. In prod (dist/server.js), it's one level up.
+    const isDist = __dirname.endsWith("dist");
+    const dev = process.env.NODE_ENV === "development" || (!isDist && process.env.NODE_ENV !== "production");
     const dir = isDist ? path_1.default.join(__dirname, "..") : __dirname;
     const app = (0, next_1.default)({ dev, hostname, port, dir });
     const handle = app.getRequestHandler();
     await app.prepare();
+    // --- Data layer ---
+    (0, paths_1.ensureDataDir)();
+    (0, db_1.initDb)();
+    (0, identity_1.migrateLegacyIdentities)();
+    (0, privateChatRepo_1.migrateLegacyPrivateFiles)();
+    console.log(`📂 Datos:  ${(0, paths_1.getDataDir)()}`);
+    const purgeExpired = () => {
+        try {
+            const files = (0, privateChatRepo_1.purgeExpiredFiles)();
+            const tombstones = (0, privateChatRepo_1.pruneDeletedMessages)();
+            if (files > 0 || tombstones > 0) {
+                console.log(`🧹 Retención: ${files} archivo(s) y ${tombstones} mensaje(s) purgados`);
+            }
+        }
+        catch (e) {
+            console.error("Error en la purga de retención:", e);
+        }
+    };
+    purgeExpired();
+    (0, privateChatRepo_1.removeOrphanUploads)();
+    const purgeTimer = setInterval(purgeExpired, (0, config_1.getPurgeIntervalMs)());
     const server = (0, express_1.default)();
-    const httpServer = (0, http_1.createServer)(server);
-    const io = new socket_io_1.Server(httpServer);
+    const tls = await (0, tls_1.resolveTlsMaterial)({
+        https: options.https,
+        certPath: options.tlsCert,
+        keyPath: options.tlsKey,
+    });
+    const httpServer = tls
+        ? (0, https_1.createServer)({ key: tls.key, cert: tls.cert }, server)
+        : (0, http_1.createServer)(server);
+    const io = new socket_io_1.Server(httpServer, {
+        // Only same-origin browser connections are accepted (mitigates DNS rebinding)
+        cors: { origin: false },
+        allowRequest: (req, callback) => {
+            const origin = req.headers.origin;
+            if (!origin) {
+                callback(null, true);
+                return;
+            }
+            try {
+                const originHost = new URL(origin).host;
+                callback(null, originHost === req.headers.host);
+            }
+            catch {
+                callback(null, false);
+            }
+        },
+    });
+    // Security headers for every response
+    server.use((_req, res, next) => {
+        res.setHeader("X-Content-Type-Options", "nosniff");
+        res.setHeader("X-Frame-Options", "DENY");
+        res.setHeader("Referrer-Policy", "no-referrer");
+        if (tls)
+            res.setHeader("Strict-Transport-Security", "max-age=15552000");
+        next();
+    });
+    // Every /api endpoint requires a valid identity token
+    server.use("/api", (req, res, next) => {
+        const identity = getRequestIdentity(req);
+        if (!identity) {
+            res.status(401).json({ error: "No autorizado" });
+            return;
+        }
+        req.persistentId = identity;
+        next();
+    });
     // Setup Socket.io events
     (0, socket_1.setupSocket)(io);
     global.io = io;
-    // Create temporary upload directory if it doesn't exist and clean it
-    const uploadDir = path_1.default.join(process.cwd(), "wifi-sharer-uploads");
-    if (fs_1.default.existsSync(uploadDir)) {
-        // Cleanup old files on startup
-        const files = fs_1.default.readdirSync(uploadDir);
-        for (const file of files) {
-            try {
-                const filePath = path_1.default.join(uploadDir, file);
-                if (fs_1.default.statSync(filePath).isFile()) {
-                    fs_1.default.unlinkSync(filePath);
-                }
-            }
-            catch (err) {
-                console.error(`Error cleaning up file ${file}:`, err);
-            }
-        }
-    }
-    else {
-        fs_1.default.mkdirSync(uploadDir, { recursive: true });
-    }
+    const uploadDir = (0, paths_1.getUploadDir)();
+    fs_1.default.mkdirSync(uploadDir, { recursive: true });
     // Upload Endpoint
     server.post("/api/upload", (req, res) => {
+        const identity = req.persistentId;
         const form = (0, formidable_1.default)({
             uploadDir: uploadDir,
             keepExtensions: true,
             maxFileSize: 500 * 1024 * 1024, // Server max: 500MB
         });
         form.parse(req, (err, fields, files) => {
-            // ... same logic as before, but using uploadDir ...
             if (err) {
                 console.error("Upload error:", err);
                 res.status(500).json({ error: "Upload failed" });
                 return;
             }
             const roomId = Array.isArray(fields.roomId) ? fields.roomId[0] : fields.roomId;
-            const senderId = Array.isArray(fields.senderId) ? fields.senderId[0] : fields.senderId;
-            const senderName = Array.isArray(fields.senderName) ? fields.senderName[0] : fields.senderName;
             const uploadedFile = Array.isArray(files.file) ? files.file[0] : files.file;
             if (!roomId || !uploadedFile) {
                 res.status(400).json({ error: "Missing fields" });
                 return;
             }
-            const room = (0, rooms_1.getRoom)(roomId);
-            if (!room) {
+            const membership = findRoomMember(roomId, identity);
+            if (!membership) {
                 fs_1.default.unlinkSync(uploadedFile.filepath);
-                res.status(404).json({ error: "Room not found" });
+                res.status(403).json({ error: "No perteneces a esta sala" });
+                return;
+            }
+            const { room, member } = membership;
+            if (room.files.length >= limits_1.MAX_ROOM_FILES) {
+                fs_1.default.unlinkSync(uploadedFile.filepath);
+                res.status(413).json({ error: "La sala alcanzó el límite de archivos" });
                 return;
             }
             if (uploadedFile.size > room.settings.maxFileSize) {
@@ -125,19 +214,22 @@ async function startServer(options) {
                 name: uploadedFile.originalFilename || "unknown",
                 size: uploadedFile.size,
                 type: uploadedFile.mimetype || "application/octet-stream",
-                senderId: senderId || "unknown",
-                senderName: senderName || "Anonymous",
+                senderId: identity,
+                senderName: member.nickname,
                 path: uploadedFile.filepath,
                 createdAt: Date.now(),
             };
             (0, rooms_1.addFileToRoom)(roomId, sharedFile);
             io.to(roomId).emit("file_uploaded", sharedFile);
-            io.to(roomId).emit("room_updated", (0, rooms_1.getRoom)(roomId));
+            const updatedRoom = (0, rooms_1.getRoom)(roomId);
+            if (updatedRoom)
+                io.to(roomId).emit("room_updated", (0, rooms_1.serializeRoomMeta)(updatedRoom));
             res.json({ success: true, file: sharedFile });
         });
     });
     // Private Upload Endpoint
     server.post("/api/upload-private", (req, res) => {
+        const identity = req.persistentId;
         const form = (0, formidable_1.default)({
             uploadDir: uploadDir,
             keepExtensions: true,
@@ -149,11 +241,19 @@ async function startServer(options) {
                 return;
             }
             const toId = Array.isArray(fields.toId) ? fields.toId[0] : fields.toId;
-            const fromId = Array.isArray(fields.fromId) ? fields.fromId[0] : fields.fromId;
-            const fromName = Array.isArray(fields.fromName) ? fields.fromName[0] : fields.fromName;
             const uploadedFile = Array.isArray(files.file) ? files.file[0] : files.file;
-            if (!toId || !fromId || !uploadedFile) {
+            if (!toId || !uploadedFile) {
                 res.status(400).json({ error: "Missing fields" });
+                return;
+            }
+            if (toId !== identity && !(0, identity_1.isRegisteredIdentity)(toId)) {
+                fs_1.default.unlinkSync(uploadedFile.filepath);
+                res.status(404).json({ error: "Destinatario desconocido" });
+                return;
+            }
+            if ((0, privateChatRepo_1.getPrivateFiles)(identity, toId).length >= limits_1.MAX_CONVERSATION_FILES) {
+                fs_1.default.unlinkSync(uploadedFile.filepath);
+                res.status(413).json({ error: "La conversación alcanzó el límite de archivos" });
                 return;
             }
             const privateFile = {
@@ -161,39 +261,54 @@ async function startServer(options) {
                 name: uploadedFile.originalFilename || "unknown",
                 size: uploadedFile.size,
                 type: uploadedFile.mimetype || "application/octet-stream",
-                fromId,
+                fromId: identity,
                 toId,
-                fromName: fromName || "Anonymous",
+                fromName: (0, presence_1.getUser)(identity)?.nickname || "Usuario",
                 path: uploadedFile.filepath,
                 createdAt: Date.now(),
             };
-            (0, presence_1.addPrivateFile)(privateFile);
+            (0, privateChatRepo_1.addPrivateFile)(privateFile);
             // Notify the recipient via socket
-            const _io = global.io;
-            if (_io && toId) {
-                const targetSocketId = (0, presence_1.getSocketId)(toId);
-                if (targetSocketId) {
-                    _io.to(targetSocketId).emit("private_file", privateFile);
-                }
+            const targetSocketId = (0, presence_1.getSocketId)(toId);
+            if (targetSocketId) {
+                io.to(targetSocketId).emit("private_file", privateFile);
             }
             res.json({ success: true, file: privateFile });
         });
     });
     // Private Download Endpoint
     server.get("/api/download-private/:fileId", (req, res) => {
+        const identity = req.persistentId;
         const { fileId } = req.params;
-        const file = (0, presence_1.getPrivateFileById)(fileId);
-        if (!file || !fs_1.default.existsSync(file.path)) {
+        const file = (0, privateChatRepo_1.getPrivateFileById)(fileId);
+        if (!file || (file.fromId !== identity && file.toId !== identity)) {
+            res.status(404).send("File not found or expired");
+            return;
+        }
+        if (!fs_1.default.existsSync(file.path)) {
             res.status(404).send("File not found or expired");
             return;
         }
         res.download(file.path, file.name);
     });
+    // Private File Status Endpoint (checks if the file still exists)
+    server.get("/api/private-file-status/:fileId", (req, res) => {
+        const identity = req.persistentId;
+        const { fileId } = req.params;
+        const file = (0, privateChatRepo_1.getPrivateFileById)(fileId);
+        if (!file || (file.fromId !== identity && file.toId !== identity)) {
+            res.json({ exists: false });
+            return;
+        }
+        const exists = fs_1.default.existsSync(file.path);
+        res.json({ exists });
+    });
     // Private Preview Endpoint
     server.get("/api/preview-private/:fileId", (req, res) => {
+        const identity = req.persistentId;
         const { fileId } = req.params;
-        const file = (0, presence_1.getPrivateFileById)(fileId);
-        if (!file || !fs_1.default.existsSync(file.path)) {
+        const file = (0, privateChatRepo_1.getPrivateFileById)(fileId);
+        if (!file || (file.fromId !== identity && file.toId !== identity) || !fs_1.default.existsSync(file.path)) {
             res.status(404).send("File not found");
             return;
         }
@@ -202,19 +317,20 @@ async function startServer(options) {
             return;
         }
         res.setHeader("Content-Type", file.type);
-        res.setHeader("Cache-Control", "public, max-age=3600");
+        res.setHeader("Cache-Control", "private, max-age=3600");
         fs_1.default.createReadStream(file.path).pipe(res);
     });
     // Download Endpoint
     server.get("/api/download/:fileId", (req, res) => {
+        const identity = req.persistentId;
         const { fileId } = req.params;
         const { roomId } = req.query;
-        const room = (0, rooms_1.getRoom)(roomId);
-        if (!room) {
+        const membership = typeof roomId === "string" ? findRoomMember(roomId, identity) : undefined;
+        if (!membership) {
             res.status(404).send("Room not found");
             return;
         }
-        const file = room.files.find(f => f.id === fileId);
+        const file = membership.room.files.find(f => f.id === fileId);
         if (!file || !fs_1.default.existsSync(file.path)) {
             res.status(404).send("File not found or expired");
             return;
@@ -223,14 +339,15 @@ async function startServer(options) {
     });
     // Preview Endpoint
     server.get("/api/preview/:fileId", (req, res) => {
+        const identity = req.persistentId;
         const { fileId } = req.params;
         const { roomId } = req.query;
-        const room = (0, rooms_1.getRoom)(roomId);
-        if (!room) {
+        const membership = typeof roomId === "string" ? findRoomMember(roomId, identity) : undefined;
+        if (!membership) {
             res.status(404).send("Room not found");
             return;
         }
-        const file = room.files.find(f => f.id === fileId);
+        const file = membership.room.files.find(f => f.id === fileId);
         if (!file || !fs_1.default.existsSync(file.path)) {
             res.status(404).send("File not found");
             return;
@@ -240,7 +357,7 @@ async function startServer(options) {
             return;
         }
         res.setHeader("Content-Type", file.type);
-        res.setHeader("Cache-Control", "public, max-age=3600");
+        res.setHeader("Cache-Control", "private, max-age=3600");
         fs_1.default.createReadStream(file.path).pipe(res);
     });
     // Next.js Handler
@@ -270,11 +387,16 @@ async function startServer(options) {
             if (localIp !== "localhost")
                 break;
         }
-        const url = `http://localhost:${actualPort}`;
+        const scheme = tls ? "https" : "http";
+        const url = `${scheme}://localhost:${actualPort}`;
         console.log(`\n🚀 Wifi File Sharer is running!`);
         console.log(`📡 Local:   ${url}`);
-        console.log(`🌐 Network: http://${localIp}:${actualPort}\n`);
-        if (!dev) {
+        console.log(`🌐 Network: ${scheme}://${localIp}:${actualPort}`);
+        if (tls && !options.tlsCert && !process.env.WFS_TLS_CERT) {
+            console.log("🔐 HTTPS con certificado autofirmado (el navegador pedirá aceptarlo)");
+        }
+        console.log("");
+        if (!dev && !process.env.WFS_NO_OPEN) {
             const open = (await Promise.resolve().then(() => __importStar(require("open")))).default;
             try {
                 await open(url);
@@ -288,7 +410,6 @@ async function startServer(options) {
         if (err.code === "EADDRINUSE") {
             const addr = httpServer.address();
             const nextPort = typeof addr === "object" && addr ? addr.port : port + 1;
-            // Note: we can't get address if it failed to bind, so we just increment our tracked port
             console.log(`⚠️  Puerto ocupado, probando con ${nextPort}...`);
             port = nextPort;
             tryListen(port);
@@ -298,6 +419,20 @@ async function startServer(options) {
             process.exit(1);
         }
     });
+    // Graceful shutdown
+    const shutdown = () => {
+        clearInterval(purgeTimer);
+        try {
+            httpServer.close();
+        }
+        catch {
+            // ignore
+        }
+        (0, db_1.closeDb)();
+        process.exit(0);
+    };
+    process.once("SIGINT", shutdown);
+    process.once("SIGTERM", shutdown);
     tryListen(port);
 }
 // Start if run directly

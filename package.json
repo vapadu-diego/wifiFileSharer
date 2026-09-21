@@ -1,7 +1,10 @@
 {
   "name": "wifi-file-sharer",
-  "version": "1.0.3",
+  "version": "1.1.0",
   "private": false,
+  "engines": {
+    "node": ">=23.4.0"
+  },
   "description": "A simple way to share files over WiFi using a robust web interface.",
   "author": "Isaias Fernandez",
   "license": "MIT",
@@ -43,6 +46,7 @@
     "open": "^11.0.0",
     "react": "19.2.3",
     "react-dom": "19.2.3",
+    "selfsigned": "^5.5.0",
     "server-only": "^0.0.1",
     "socket.io": "^4.8.3",
     "socket.io-client": "^4.8.3"
@@ -50,7 +54,7 @@
   "devDependencies": {
     "@types/express": "^5.0.6",
     "@types/formidable": "^3.4.6",
-    "@types/node": "^20.19.27",
+    "@types/node": "^24.13.6",
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "cross-env": "^10.1.0",
