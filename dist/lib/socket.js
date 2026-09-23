@@ -10,6 +10,8 @@ const presence_1 = require("./presence");
 const privateChatRepo_1 = require("./privateChatRepo");
 const types_1 = require("./types");
 const identity_1 = require("./identity");
+const directory_1 = require("./directory");
+const config_1 = require("./config");
 const limits_1 = require("./limits");
 function parseUserAgent(ua) {
     let os = "Unknown";
@@ -133,7 +135,7 @@ const setupSocket = (io) => {
             (0, presence_1.cancelRemoveUser)(persistentId);
             // The stored nickname always wins: it only changes via update_nickname
             const user = (0, presence_1.addUser)(socket.id, persistentId, identity.nickname, os, browser);
-            const onlineUsers = (0, presence_1.getAllUsers)();
+            const onlineUsers = (0, directory_1.getDirectory)();
             if (wasReconnect || displaced) {
                 // Reconnection or takeover — notify others to update socketId
                 socket.broadcast.emit("user_reconnected", user);
@@ -148,6 +150,8 @@ const setupSocket = (io) => {
                 onlineUsers,
                 token: identity.token,
                 unreadCounts: (0, privateChatRepo_1.getUnreadCounts)(persistentId),
+                settings: (0, identity_1.getIdentitySettings)(persistentId),
+                retentionDays: (0, config_1.getRetentionDays)(),
             });
         });
         // Change the display nickname. The new name must be free across the whole
@@ -195,7 +199,28 @@ const setupSocket = (io) => {
             }
             callback({ success: true, user: user ?? null, nickname: result.nickname });
         });
-        // Get all online users
+        // Change identity settings (offline visibility)
+        ackOn("update_settings", ({ discoverable }, callback) => {
+            const myPersistentId = (0, presence_1.getPersistentId)(socket.id);
+            if (!myPersistentId) {
+                callback({ success: false, error: "Usuario no registrado" });
+                return;
+            }
+            if (typeof discoverable !== "boolean") {
+                callback({ success: false, error: "Ajuste inválido" });
+                return;
+            }
+            if (!allowEvent("settings", 10, 60000)) {
+                callback({ success: false, error: "Demasiados cambios seguidos, espera un momento" });
+                return;
+            }
+            if (!(0, identity_1.setIdentityDiscoverable)(myPersistentId, discoverable)) {
+                callback({ success: false, error: "Identidad no registrada" });
+                return;
+            }
+            callback({ success: true, settings: { discoverable } });
+        });
+        // Get all contacts (online users + offline discoverable identities)
         socket.on("get_online_users", (callback) => {
             if (typeof callback !== "function")
                 return;
@@ -203,7 +228,7 @@ const setupSocket = (io) => {
                 callback({ onlineUsers: [] });
                 return;
             }
-            callback({ onlineUsers: (0, presence_1.getAllUsers)() });
+            callback({ onlineUsers: (0, directory_1.getDirectory)() });
         });
         // Send a private message to another user
         ackOn("send_private_message", ({ toId, content, replyTo }, callback) => {
@@ -214,6 +239,10 @@ const setupSocket = (io) => {
             }
             if (typeof toId !== "string" || !identity_1.PERSISTENT_ID_REGEX.test(toId)) {
                 callback({ success: false, error: "Destinatario inválido" });
+                return;
+            }
+            if (!(0, identity_1.isRegisteredIdentity)(toId)) {
+                callback({ success: false, error: "Destinatario desconocido" });
                 return;
             }
             if (typeof content !== "string" || !content.trim()) {
@@ -842,7 +871,21 @@ const setupSocket = (io) => {
             // Grace period: don't remove user immediately, wait 15s
             (0, presence_1.scheduleRemoveUser)(socket.id, (user) => {
                 // Only fires if user didn't reconnect within 15 seconds
-                io.emit("user_offline", { persistentId: user.persistentId });
+                const settings = (0, identity_1.getIdentitySettings)(user.persistentId);
+                if (settings?.discoverable) {
+                    // Keep the contact in the directory, marked as offline and without
+                    // device info (there is no active device anymore)
+                    io.emit("user_updated", {
+                        ...user,
+                        id: user.persistentId,
+                        os: "",
+                        browser: "",
+                        isOnline: false,
+                    });
+                }
+                else {
+                    io.emit("user_offline", { persistentId: user.persistentId });
+                }
             });
             // Rooms: leave immediately (reconnect_to_room handles re-joining)
             for (const roomId of socket.rooms) {

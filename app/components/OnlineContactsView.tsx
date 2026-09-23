@@ -11,7 +11,7 @@ interface OnlineContactsViewProps {
   onStartChat: (user: OnlineUser) => void;
   onCreateRoom: () => void;
   onJoinRoom: () => void;
-  onEditNickname?: () => void;
+  onOpenSettings?: () => void;
   isAdmin?: boolean;
   showAdminPanel?: boolean;
   onToggleAdminPanel?: () => void;
@@ -37,13 +37,22 @@ export default function OnlineContactsView({
   onStartChat,
   onCreateRoom,
   onJoinRoom,
-  onEditNickname,
+  onOpenSettings,
   isAdmin,
   showAdminPanel,
   onToggleAdminPanel,
   children,
 }: OnlineContactsViewProps) {
-  const filtered = onlineUsers.filter((u) => u.persistentId !== myPersistentId);
+  const filtered = onlineUsers
+    .filter((u) => u.persistentId !== myPersistentId)
+    .sort((a, b) => {
+      const aOnline = a.isOnline !== false;
+      const bOnline = b.isOnline !== false;
+      if (aOnline !== bOnline) return aOnline ? -1 : 1;
+      return a.nickname.localeCompare(b.nickname, "es");
+    });
+  const onlineCount = filtered.filter((u) => u.isOnline !== false).length;
+  const offlineCount = filtered.length - onlineCount;
 
   return (
     <div
@@ -78,22 +87,23 @@ export default function OnlineContactsView({
               {myNickname}
             </div>
             <div className="text-muted" style={{ fontSize: "0.7rem" }}>
-              {filtered.length} conectado{filtered.length !== 1 ? "s" : ""}
+              {onlineCount} en línea
+              {offlineCount > 0 ? ` · ${offlineCount} desconectado${offlineCount !== 1 ? "s" : ""}` : ""}
             </div>
           </div>
         </div>
 
         <div className="flex gap-1">
-          {onEditNickname && (
+          {onOpenSettings && (
             <button
               className="btn btn-ghost btn-icon"
-              onClick={onEditNickname}
-              title="Cambiar nombre"
+              onClick={onOpenSettings}
+              title="Configuración"
               style={{ width: "34px", height: "34px", padding: 0 }}
             >
-              <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
-                <path d="M18.5 2.5a2.121 2.121 0 1 1 3 3L12 15l-4 1 1-4z" />
+              <svg width="17" height="17" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                <circle cx="12" cy="12" r="3" />
+                <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
               </svg>
             </button>
           )}
@@ -149,56 +159,68 @@ export default function OnlineContactsView({
                 <path d="M23 21v-2a4 4 0 0 0-3-3.87M16 3.13a4 4 0 0 1 0 7.75" />
               </svg>
             </div>
-            <span>No hay otros usuarios conectados</span>
+            <span>No hay contactos disponibles</span>
             <div style={{ fontSize: "0.8rem", marginTop: "0.5rem" }}>
               Invita a alguien a conectarse al servidor
             </div>
           </div>
         ) : (
           <div className="flex flex-col gap-1">
-            {filtered.map((user) => (
-                  <button
-                key={user.persistentId}
-                onClick={() => onStartChat(user)}
-                className="user-card"
-                style={{
-                  width: "100%",
-                  cursor: "pointer",
-                  border: "1px solid var(--card-border)",
-                  textAlign: "left",
-                  transition: "all 0.2s",
-                  borderRadius: "var(--radius)",
-                  color: "var(--foreground)",
-                  background: "rgba(255,255,255,0.03)",
-                }}
-              >
-                <div style={{ position: "relative", flexShrink: 0 }}>
-                  <div className="user-avatar" style={{ width: "40px", height: "40px" }}>
-                    {getInitials(user.nickname)}
+            {filtered.map((user) => {
+              const isOnline = user.isOnline !== false;
+              return (
+                <button
+                  key={user.persistentId}
+                  onClick={() => onStartChat(user)}
+                  className="user-card"
+                  style={{
+                    width: "100%",
+                    cursor: "pointer",
+                    border: "1px solid var(--card-border)",
+                    textAlign: "left",
+                    transition: "all 0.2s",
+                    borderRadius: "var(--radius)",
+                    color: "var(--foreground)",
+                    background: "rgba(255,255,255,0.03)",
+                    opacity: isOnline ? 1 : 0.65,
+                  }}
+                >
+                  <div style={{ position: "relative", flexShrink: 0 }}>
+                    <div className="user-avatar" style={{ width: "40px", height: "40px" }}>
+                      {getInitials(user.nickname)}
+                    </div>
+                    {unreadCounts[user.persistentId] > 0 && (
+                      <span className="badge-unread">
+                        {unreadCounts[user.persistentId] > 99 ? "99+" : unreadCounts[user.persistentId]}
+                      </span>
+                    )}
                   </div>
-                  {unreadCounts[user.persistentId] > 0 && (
-                    <span className="badge-unread">
-                      {unreadCounts[user.persistentId] > 99 ? "99+" : unreadCounts[user.persistentId]}
-                    </span>
-                  )}
-                </div>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div className="flex items-center gap-2" style={{ flexWrap: "wrap" }}>
-                    <span className="truncate" style={{ fontWeight: 600, fontSize: "0.9rem" }}>
-                      {user.nickname}
-                    </span>
-                    <span style={{ fontSize: "0.65rem", color: "var(--success)" }}>●</span>
+                  <div style={{ flex: 1, minWidth: 0 }}>
+                    <div className="flex items-center gap-2" style={{ flexWrap: "wrap" }}>
+                      <span className="truncate" style={{ fontWeight: 600, fontSize: "0.9rem" }}>
+                        {user.nickname}
+                      </span>
+                      <span style={{ fontSize: "0.65rem", color: isOnline ? "var(--success)" : "var(--muted)" }}>
+                        ●
+                      </span>
+                    </div>
+                    <div className="text-muted" style={{ fontSize: "0.7rem", display: "flex", gap: "6px", alignItems: "center" }}>
+                      {isOnline ? (
+                        <>
+                          <DeviceIcon os={user.os} />
+                          <span>{user.os} · {user.browser}</span>
+                        </>
+                      ) : (
+                        <span>Desconectado</span>
+                      )}
+                    </div>
                   </div>
-                  <div className="text-muted" style={{ fontSize: "0.7rem", display: "flex", gap: "6px", alignItems: "center" }}>
-                    <DeviceIcon os={user.os} />
-                    <span>{user.os} · {user.browser}</span>
-                  </div>
-                </div>
-                <svg width="18" height="18" fill="none" stroke="var(--muted)" strokeWidth="2" viewBox="0 0 24 24" style={{ opacity: 0.4 }}>
-                  <path d="M9 18l6-6-6-6" />
-                </svg>
-              </button>
-            ))}
+                  <svg width="18" height="18" fill="none" stroke="var(--muted)" strokeWidth="2" viewBox="0 0 24 24" style={{ opacity: 0.4 }}>
+                    <path d="M9 18l6-6-6-6" />
+                  </svg>
+                </button>
+              );
+            })}
           </div>
         )}
       </div>

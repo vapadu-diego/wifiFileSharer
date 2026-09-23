@@ -39,6 +39,8 @@ export function useContacts(
       });
     };
 
+    // Only fired for users who hid themselves while offline; discoverable users
+    // stay in the list through `user_updated` with isOnline: false
     const handleUserOffline = ({ persistentId }: { persistentId: string }) => {
       setOnlineUsers((prev) => prev.filter((u) => u.persistentId !== persistentId));
       // DON'T close the chat — just mark the partner as offline

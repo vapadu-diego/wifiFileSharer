@@ -54,8 +54,22 @@ export function initDb(): DatabaseSync {
   db.exec("PRAGMA synchronous = NORMAL");
   db.exec("PRAGMA busy_timeout = 5000");
   db.exec(SCHEMA);
-  db.exec("PRAGMA user_version = 1");
+  migrateSchema(db);
+  db.exec("PRAGMA user_version = 2");
   return db;
+}
+
+function hasColumn(database: DatabaseSync, table: string, column: string): boolean {
+  const rows = database.prepare(`PRAGMA table_info(${table})`).all() as unknown as {
+    name: string;
+  }[];
+  return rows.some((row) => row.name === column);
+}
+
+function migrateSchema(database: DatabaseSync): void {
+  if (!hasColumn(database, "users", "discoverable")) {
+    database.exec(`ALTER TABLE users ADD COLUMN discoverable INTEGER NOT NULL DEFAULT 1`);
+  }
 }
 
 export function getDb(): DatabaseSync {

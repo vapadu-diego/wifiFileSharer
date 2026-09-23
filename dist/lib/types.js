@@ -1,8 +1,11 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.EXTENSION_TO_CATEGORY = exports.FILE_TYPE_ICONS = exports.FILE_SIZE_OPTIONS = exports.DEFAULT_ROOM_SETTINGS = void 0;
+exports.EXTENSION_TO_CATEGORY = exports.FILE_TYPE_ICONS = exports.FILE_SIZE_OPTIONS = exports.DEFAULT_ROOM_SETTINGS = exports.DEFAULT_USER_SETTINGS = void 0;
 exports.sanitizeReplyRef = sanitizeReplyRef;
 exports.getFileCategory = getFileCategory;
+exports.DEFAULT_USER_SETTINGS = {
+    discoverable: true,
+};
 const REPLY_SNIPPET_MAX = 200;
 const REPLY_EXCERPT_MAX = 400;
 function sanitizeReplyRef(reply) {

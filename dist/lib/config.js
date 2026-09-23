@@ -2,6 +2,7 @@
 Object.defineProperty(exports, "__esModule", { value: true });
 exports.MIN_NODE_VERSION = void 0;
 exports.getRetentionMs = getRetentionMs;
+exports.getRetentionDays = getRetentionDays;
 exports.getPurgeIntervalMs = getPurgeIntervalMs;
 exports.getMaxRoomTexts = getMaxRoomTexts;
 exports.checkNodeVersion = checkNodeVersion;
@@ -19,6 +20,14 @@ function getRetentionMs() {
     if (!Number.isFinite(days) || days <= 0)
         return 0;
     return days * 24 * 60 * 60 * 1000;
+}
+/**
+ * File retention window in days. `0` means keep files forever. Kept in sync
+ * with `getRetentionMs` (fractional days are allowed).
+ */
+function getRetentionDays() {
+    const ms = getRetentionMs();
+    return ms > 0 ? ms / (24 * 60 * 60 * 1000) : 0;
 }
 function getPurgeIntervalMs() {
     const raw = Number.parseInt(process.env.WFS_PURGE_INTERVAL_MS || "", 10);

@@ -9,6 +9,9 @@ exports.verifyTokenSelf = verifyTokenSelf;
 exports.verifyToken = verifyToken;
 exports.isRegisteredIdentity = isRegisteredIdentity;
 exports.getIdentityNickname = getIdentityNickname;
+exports.getIdentitySettings = getIdentitySettings;
+exports.setIdentityDiscoverable = setIdentityDiscoverable;
+exports.listIdentities = listIdentities;
 exports.isReservedNickname = isReservedNickname;
 exports.isNicknameTaken = isNicknameTaken;
 exports.registerIdentity = registerIdentity;
@@ -93,6 +96,34 @@ function isRegisteredIdentity(persistentId) {
 }
 function getIdentityNickname(persistentId) {
     return getIdentityRow(persistentId)?.nickname;
+}
+function getIdentitySettings(persistentId) {
+    const row = (0, db_1.getDb)()
+        .prepare(`SELECT nickname, discoverable FROM users WHERE persistent_id = ?`)
+        .get(persistentId);
+    if (!row)
+        return undefined;
+    return { nickname: row.nickname, discoverable: Number(row.discoverable) !== 0 };
+}
+function setIdentityDiscoverable(persistentId, discoverable) {
+    const info = (0, db_1.getDb)()
+        .prepare(`UPDATE users SET discoverable = ? WHERE persistent_id = ?`)
+        .run(discoverable ? 1 : 0, persistentId);
+    return Number(info.changes) > 0;
+}
+/**
+ * All registered identities, used to build the contact directory (offline
+ * discoverable users included).
+ */
+function listIdentities() {
+    const rows = (0, db_1.getDb)()
+        .prepare(`SELECT persistent_id, nickname, discoverable FROM users`)
+        .all();
+    return rows.map((row) => ({
+        persistentId: row.persistent_id,
+        nickname: row.nickname,
+        discoverable: Number(row.discoverable) !== 0,
+    }));
 }
 function normalizeNickname(nickname) {
     return nickname.trim().replace(/\s+/g, " ").toLowerCase();

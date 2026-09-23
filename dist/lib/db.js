@@ -58,8 +58,18 @@ function initDb() {
     db.exec("PRAGMA synchronous = NORMAL");
     db.exec("PRAGMA busy_timeout = 5000");
     db.exec(SCHEMA);
-    db.exec("PRAGMA user_version = 1");
+    migrateSchema(db);
+    db.exec("PRAGMA user_version = 2");
     return db;
+}
+function hasColumn(database, table, column) {
+    const rows = database.prepare(`PRAGMA table_info(${table})`).all();
+    return rows.some((row) => row.name === column);
+}
+function migrateSchema(database) {
+    if (!hasColumn(database, "users", "discoverable")) {
+        database.exec(`ALTER TABLE users ADD COLUMN discoverable INTEGER NOT NULL DEFAULT 1`);
+    }
 }
 function getDb() {
     if (!db)

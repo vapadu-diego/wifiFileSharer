@@ -90,6 +90,53 @@ export function getIdentityNickname(persistentId: string): string | undefined {
   return getIdentityRow(persistentId)?.nickname;
 }
 
+export interface IdentitySettings {
+  nickname: string;
+  discoverable: boolean;
+}
+
+export interface RegisteredIdentity {
+  persistentId: string;
+  nickname: string;
+  discoverable: boolean;
+}
+
+interface SettingsRow {
+  persistent_id: string;
+  nickname: string;
+  discoverable: number;
+}
+
+export function getIdentitySettings(persistentId: string): IdentitySettings | undefined {
+  const row = getDb()
+    .prepare(`SELECT nickname, discoverable FROM users WHERE persistent_id = ?`)
+    .get(persistentId) as unknown as { nickname: string; discoverable: number } | undefined;
+  if (!row) return undefined;
+  return { nickname: row.nickname, discoverable: Number(row.discoverable) !== 0 };
+}
+
+export function setIdentityDiscoverable(persistentId: string, discoverable: boolean): boolean {
+  const info = getDb()
+    .prepare(`UPDATE users SET discoverable = ? WHERE persistent_id = ?`)
+    .run(discoverable ? 1 : 0, persistentId);
+  return Number(info.changes) > 0;
+}
+
+/**
+ * All registered identities, used to build the contact directory (offline
+ * discoverable users included).
+ */
+export function listIdentities(): RegisteredIdentity[] {
+  const rows = getDb()
+    .prepare(`SELECT persistent_id, nickname, discoverable FROM users`)
+    .all() as unknown as SettingsRow[];
+  return rows.map((row) => ({
+    persistentId: row.persistent_id,
+    nickname: row.nickname,
+    discoverable: Number(row.discoverable) !== 0,
+  }));
+}
+
 function normalizeNickname(nickname: string): string {
   return nickname.trim().replace(/\s+/g, " ").toLowerCase();
 }

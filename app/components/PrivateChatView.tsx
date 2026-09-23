@@ -1264,11 +1264,25 @@ export default function PrivateChatView({
             ) : (
               <span>{partner.isOnline === false ? "Desconectado" : "En línea"}</span>
             )}
-            <span>·</span>
-            <span>{partner.os} · {partner.browser}</span>
           </div>
         </div>
       </div>
+
+      {partner.isOnline === false && (
+        <div
+          className="animate-fadeIn"
+          style={{
+            padding: "8px 16px",
+            background: "rgba(148, 163, 184, 0.08)",
+            borderBottom: "1px solid var(--card-border)",
+            color: "var(--muted)",
+            fontSize: "0.75rem",
+            textAlign: "center",
+          }}
+        >
+          {partner.nickname} está desconectado. Los mensajes se entregarán cuando se conecte.
+        </div>
+      )}
 
       {/* Messages area */}
       <div

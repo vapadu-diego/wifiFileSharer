@@ -15,6 +15,15 @@ export function getRetentionMs(): number {
   return days * 24 * 60 * 60 * 1000;
 }
 
+/**
+ * File retention window in days. `0` means keep files forever. Kept in sync
+ * with `getRetentionMs` (fractional days are allowed).
+ */
+export function getRetentionDays(): number {
+  const ms = getRetentionMs();
+  return ms > 0 ? ms / (24 * 60 * 60 * 1000) : 0;
+}
+
 export function getPurgeIntervalMs(): number {
   const raw = Number.parseInt(process.env.WFS_PURGE_INTERVAL_MS || "", 10);
   return Number.isFinite(raw) && raw >= 250 ? raw : DEFAULT_PURGE_INTERVAL_MS;

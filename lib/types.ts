@@ -70,6 +70,14 @@ export interface OnlineUser {
   isOnline?: boolean;
 }
 
+export interface UserSettings {
+  discoverable: boolean;
+}
+
+export const DEFAULT_USER_SETTINGS: UserSettings = {
+  discoverable: true,
+};
+
 export interface ReplyRef {
   id: string;
   senderName: string;

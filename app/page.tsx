@@ -19,7 +19,7 @@ import RoomView from "./components/RoomView";
 import AdminPanel from "./components/AdminPanel";
 import Modal from "./components/Modal";
 import ChatLayout from "./components/ChatLayout";
-import EditNicknameModal from "./components/EditNicknameModal";
+import SettingsModal from "./components/SettingsModal";
 import { ToastStack } from "./components/ToastStack";
 
 const RECENT_ROOMS_KEY = "wifi_sharer_recent_rooms";
@@ -36,16 +36,18 @@ function readRecentRooms() {
 export default function Home() {
   const { socket, isReconnecting } = useSocket();
   const { modalConfig, showModal, hideModal } = useModal();
-  const { myNickname, myPersistentId, myUserId, registerUser, renameUser } = useSession();
+  const { myNickname, myPersistentId, myUserId, mySettings, retentionDays, registerUser, renameUser, updateSettings } = useSession();
   const chatPartnerRef = useRef<OnlineUser | null>(null);
   const [showRoomForm, setShowRoomForm] = useState(false);
   const [roomFormMode, setRoomFormMode] = useState<"create" | "join">("create");
   const [unreadBrowserCount, setUnreadBrowserCount] = useState(0);
   const [lastIncomingInfo, setLastIncomingInfo] = useState<{ sender: string; body: string } | null>(null);
   const [identityBlocked, setIdentityBlocked] = useState(false);
-  const [showNicknameModal, setShowNicknameModal] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const [nicknameError, setNicknameError] = useState("");
   const [nicknameSaving, setNicknameSaving] = useState(false);
+  const [settingsError, setSettingsError] = useState("");
+  const [settingsSaving, setSettingsSaving] = useState(false);
   const [nameError, setNameError] = useState("");
   const { toasts, pushToast, dismiss: dismissToast } = useToasts();
   useFaviconBadge(unreadBrowserCount);
@@ -106,7 +108,6 @@ export default function Home() {
         nickname,
         () => {
           setNicknameSaving(false);
-          setShowNicknameModal(false);
         },
         (error) => {
           setNicknameSaving(false);
@@ -116,6 +117,30 @@ export default function Home() {
     },
     [socket, renameUser]
   );
+
+  const handleToggleDiscoverable = useCallback(
+    (discoverable: boolean) => {
+      if (!socket) return;
+      setSettingsSaving(true);
+      setSettingsError("");
+      updateSettings(
+        socket,
+        { discoverable },
+        () => setSettingsSaving(false),
+        (error) => {
+          setSettingsSaving(false);
+          setSettingsError(error);
+        }
+      );
+    },
+    [socket, updateSettings]
+  );
+
+  const handleOpenSettings = useCallback(() => {
+    setNicknameError("");
+    setSettingsError("");
+    setShowSettings(true);
+  }, []);
 
   useEffect(() => {
     if (unreadBrowserCount > 0) {
@@ -335,10 +360,7 @@ export default function Home() {
               onStartChat={handleStartChat}
               onCreateRoom={handleOpenCreateRoom}
               onJoinRoom={handleOpenJoinRoom}
-              onEditNickname={() => {
-                setNicknameError("");
-                setShowNicknameModal(true);
-              }}
+              onOpenSettings={handleOpenSettings}
               isAdmin={isAdmin}
               showAdminPanel={showAdminPanel}
               onToggleAdminPanel={() => setShowAdminPanel(!showAdminPanel)}
@@ -484,17 +506,23 @@ export default function Home() {
         }}
       />
 
-      {showNicknameModal && (
-        <EditNicknameModal
+      {showSettings && (
+        <SettingsModal
           currentName={myNickname}
-          error={nicknameError}
-          saving={nicknameSaving}
+          discoverable={mySettings.discoverable}
+          retentionDays={retentionDays}
+          nameSaving={nicknameSaving}
+          nameError={nicknameError}
+          settingsSaving={settingsSaving}
+          settingsError={settingsError}
           onClose={() => {
-            if (nicknameSaving) return;
-            setShowNicknameModal(false);
+            if (nicknameSaving || settingsSaving) return;
+            setShowSettings(false);
             setNicknameError("");
+            setSettingsError("");
           }}
-          onSave={handleRenameNickname}
+          onSaveName={handleRenameNickname}
+          onToggleDiscoverable={handleToggleDiscoverable}
         />
       )}
 

@@ -2,11 +2,19 @@
 
 import { useState, useCallback } from "react";
 import { Socket } from "socket.io-client";
-import { OnlineUser } from "@/lib/types";
+import { DEFAULT_USER_SETTINGS, OnlineUser, UserSettings } from "@/lib/types";
 
 const PERSISTENT_ID_KEY = "wifi_sharer_persistent_id";
 const TOKEN_KEY = "wifi_sharer_token";
 const TOKEN_COOKIE = "wfs_token";
+const DISCOVERABLE_KEY = "wifi_sharer_discoverable";
+const DEFAULT_RETENTION_DAYS = 7;
+
+function readStoredDiscoverable(): boolean {
+  if (typeof window === "undefined") return DEFAULT_USER_SETTINGS.discoverable;
+  const stored = localStorage.getItem(DISCOVERABLE_KEY);
+  return stored === null ? DEFAULT_USER_SETTINGS.discoverable : stored === "1";
+}
 
 export function generateUUID(): string {
   return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (c) => {
@@ -37,6 +45,8 @@ interface RegisterUserResponse {
   onlineUsers: OnlineUser[];
   token?: string;
   unreadCounts?: Record<string, number>;
+  settings?: UserSettings;
+  retentionDays?: number;
   error?: string;
 }
 
@@ -44,6 +54,12 @@ interface UpdateNicknameResponse {
   success: boolean;
   user?: OnlineUser | null;
   nickname?: string;
+  error?: string;
+}
+
+interface UpdateSettingsResponse {
+  success: boolean;
+  settings?: UserSettings;
   error?: string;
 }
 
@@ -55,6 +71,10 @@ export function useSession() {
     }
     return "";
   });
+  const [mySettings, setMySettings] = useState<UserSettings>(() => ({
+    discoverable: readStoredDiscoverable(),
+  }));
+  const [retentionDays, setRetentionDays] = useState(DEFAULT_RETENTION_DAYS);
   const myUserId = myPersistentId;
 
   const registerUser = useCallback(
@@ -82,6 +102,11 @@ export function useSession() {
             setMyNickname(canonical);
             setMyPersistentId(persistentId);
             localStorage.setItem("wifi_sharer_nickname", canonical);
+            if (res.settings) {
+              setMySettings(res.settings);
+              localStorage.setItem(DISCOVERABLE_KEY, res.settings.discoverable ? "1" : "0");
+            }
+            if (typeof res.retentionDays === "number") setRetentionDays(res.retentionDays);
             onSuccess?.(res.onlineUsers || [], persistentId, res.unreadCounts || {});
           } else {
             onError?.(res.error || "No se pudo registrar la sesión");
@@ -116,12 +141,40 @@ export function useSession() {
     []
   );
 
+  const updateSettings = useCallback(
+    (
+      socketInstance: Socket,
+      settings: Partial<UserSettings>,
+      onSuccess?: (settings: UserSettings) => void,
+      onError?: (error: string) => void
+    ) => {
+      socketInstance.emit(
+        "update_settings",
+        settings,
+        (res: UpdateSettingsResponse) => {
+          if (res.success && res.settings) {
+            setMySettings(res.settings);
+            localStorage.setItem(DISCOVERABLE_KEY, res.settings.discoverable ? "1" : "0");
+            onSuccess?.(res.settings);
+          } else {
+            onError?.(res.error || "No se pudieron guardar los ajustes");
+          }
+        }
+      );
+    },
+    []
+  );
+
   return {
     myNickname,
     myPersistentId,
     myUserId,
+    mySettings,
+    setMySettings,
+    retentionDays,
     registerUser,
     renameUser,
+    updateSettings,
     setMyNickname,
     setMyPersistentId,
   };
