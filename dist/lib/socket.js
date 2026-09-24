@@ -9,11 +9,12 @@ const rooms_1 = require("./rooms");
 const presence_1 = require("./presence");
 const privateChatRepo_1 = require("./privateChatRepo");
 const types_1 = require("./types");
+const browserInfo_1 = require("./browserInfo");
 const identity_1 = require("./identity");
 const directory_1 = require("./directory");
 const config_1 = require("./config");
 const limits_1 = require("./limits");
-function parseUserAgent(ua) {
+function parseUserAgent(ua, secChUa = "") {
     let os = "Unknown";
     let browser = "Unknown";
     // Order matters: Android UAs contain "Linux" and iOS UAs contain "Mac OS"
@@ -27,12 +28,20 @@ function parseUserAgent(ua) {
         os = "macOS";
     else if (ua.includes("Linux"))
         os = "Linux";
+    // Brave on desktop/Android hides behind Chrome's UA but advertises itself
+    // through the Sec-CH-UA client hint (it may omit it on some sites)
     if (ua.includes("Firefox"))
         browser = "Firefox";
     else if (ua.includes("Edg/"))
         browser = "Edge";
     else if (ua.includes("OPR") || ua.includes("Opera"))
         browser = "Opera";
+    else if (ua.includes("Vivaldi"))
+        browser = "Vivaldi";
+    else if (ua.includes("SamsungBrowser"))
+        browser = "Samsung Internet";
+    else if (ua.includes("Brave") || secChUa.includes('"Brave"'))
+        browser = "Brave";
     else if (ua.includes("Chrome"))
         browser = "Chrome";
     else if (ua.includes("Safari"))
@@ -57,7 +66,10 @@ const setupSocket = (io) => {
     io.on("connection", (socket) => {
         const clientIp = socket.handshake.address || "Unknown";
         const userAgent = socket.handshake.headers["user-agent"] || "";
-        const { os, browser } = parseUserAgent(userAgent);
+        const secChUa = socket.handshake.headers["sec-ch-ua"];
+        const { os, browser: headerBrowser } = parseUserAgent(userAgent, typeof secChUa === "string" ? secChUa : "");
+        // The client can refine this (e.g. Brave hides from the User-Agent)
+        let browser = headerBrowser;
         const isAdmin = isLocalhost(clientIp);
         // Per-connection state (released automatically when the socket dies)
         const rateBuckets = new Map();
@@ -95,7 +107,7 @@ const setupSocket = (io) => {
         };
         // Tell client if they are admin
         socket.emit("admin_status", { isAdmin });
-        ackOn("register_user", ({ nickname, persistentId, token }, callback) => {
+        ackOn("register_user", ({ nickname, persistentId, token, browser: browserHint }, callback) => {
             if (typeof persistentId !== "string" || !identity_1.PERSISTENT_ID_REGEX.test(persistentId)) {
                 callback({ success: false, error: "Identificador de usuario inválido" });
                 return;
@@ -105,6 +117,11 @@ const setupSocket = (io) => {
                 return;
             }
             const cleanNickname = nickname.trim().slice(0, limits_1.MAX_NICKNAME_LENGTH);
+            // Client-side detection refines the UA heuristic (Brave, Chromium variants)
+            if (typeof browserHint === "string" &&
+                browserInfo_1.KNOWN_BROWSERS.includes(browserHint)) {
+                browser = browserHint;
+            }
             const identity = (0, identity_1.registerIdentity)(persistentId, typeof token === "string" ? token : undefined, cleanNickname);
             if (!identity.ok) {
                 callback({ success: false, error: identity.error });

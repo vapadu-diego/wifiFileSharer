@@ -4,12 +4,13 @@ import { createRoom, joinRoom, joinRoomAsGhost, leaveRoom, addTextToRoom, getRoo
 import { addUser, scheduleRemoveUser, cancelRemoveUser, getAllUsers, getPersistentId, getSocketId, getUser, renameUser } from "./presence";
 import { addPrivateMessage, getConversationPage, getConversationSince, getMessageContext, getPrivateFiles, getPrivateUpdatesSince, getUnreadCounts, importLocalMessages, editPrivateMessage, deletePrivateMessage, deletePrivateFile, markConversationRead, searchPrivateMessages } from "./privateChatRepo";
 import { User, SharedText, RoomSettings, sanitizeReplyRef } from "./types";
+import { KNOWN_BROWSERS } from "./browserInfo";
 import { registerIdentity, renameIdentity, isReservedNickname, isRegisteredIdentity, getIdentitySettings, setIdentityDiscoverable, PERSISTENT_ID_REGEX } from "./identity";
 import { getDirectory } from "./directory";
 import { getRetentionDays } from "./config";
 import { MAX_CONTENT_LENGTH, MAX_NICKNAME_LENGTH, RATE_LIMIT_MAX_EVENTS, RATE_LIMIT_WINDOW_MS } from "./limits";
 
-function parseUserAgent(ua: string): { os: string; browser: string } {
+function parseUserAgent(ua: string, secChUa = ""): { os: string; browser: string } {
   let os = "Unknown";
   let browser = "Unknown";
 
@@ -20,9 +21,14 @@ function parseUserAgent(ua: string): { os: string; browser: string } {
   else if (ua.includes("Mac OS")) os = "macOS";
   else if (ua.includes("Linux")) os = "Linux";
 
+  // Brave on desktop/Android hides behind Chrome's UA but advertises itself
+  // through the Sec-CH-UA client hint (it may omit it on some sites)
   if (ua.includes("Firefox")) browser = "Firefox";
   else if (ua.includes("Edg/")) browser = "Edge";
   else if (ua.includes("OPR") || ua.includes("Opera")) browser = "Opera";
+  else if (ua.includes("Vivaldi")) browser = "Vivaldi";
+  else if (ua.includes("SamsungBrowser")) browser = "Samsung Internet";
+  else if (ua.includes("Brave") || secChUa.includes('"Brave"')) browser = "Brave";
   else if (ua.includes("Chrome")) browser = "Chrome";
   else if (ua.includes("Safari")) browser = "Safari";
 
@@ -51,7 +57,13 @@ export const setupSocket = (io: Server) => {
   io.on("connection", (socket: Socket) => {
     const clientIp = socket.handshake.address || "Unknown";
     const userAgent = socket.handshake.headers["user-agent"] || "";
-    const { os, browser } = parseUserAgent(userAgent);
+    const secChUa = socket.handshake.headers["sec-ch-ua"];
+    const { os, browser: headerBrowser } = parseUserAgent(
+      userAgent,
+      typeof secChUa === "string" ? secChUa : ""
+    );
+    // The client can refine this (e.g. Brave hides from the User-Agent)
+    let browser = headerBrowser;
     const isAdmin = isLocalhost(clientIp);
 
     // Per-connection state (released automatically when the socket dies)
@@ -98,7 +110,7 @@ export const setupSocket = (io: Server) => {
     // Tell client if they are admin
     socket.emit("admin_status", { isAdmin });
 
-    ackOn("register_user", ({ nickname, persistentId, token }, callback) => {
+    ackOn("register_user", ({ nickname, persistentId, token, browser: browserHint }, callback) => {
       if (typeof persistentId !== "string" || !PERSISTENT_ID_REGEX.test(persistentId)) {
         callback({ success: false, error: "Identificador de usuario inválido" });
         return;
@@ -108,6 +120,14 @@ export const setupSocket = (io: Server) => {
         return;
       }
       const cleanNickname = nickname.trim().slice(0, MAX_NICKNAME_LENGTH);
+
+      // Client-side detection refines the UA heuristic (Brave, Chromium variants)
+      if (
+        typeof browserHint === "string" &&
+        (KNOWN_BROWSERS as readonly string[]).includes(browserHint)
+      ) {
+        browser = browserHint;
+      }
 
       const identity = registerIdentity(
         persistentId,

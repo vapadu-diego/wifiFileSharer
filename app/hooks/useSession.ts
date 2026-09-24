@@ -1,8 +1,9 @@
 "use client";
 
-import { useState, useCallback } from "react";
+import { useState, useCallback, useEffect, useRef } from "react";
 import { Socket } from "socket.io-client";
 import { DEFAULT_USER_SETTINGS, OnlineUser, UserSettings } from "@/lib/types";
+import { detectBrowserName, detectBrowserNameAsync } from "@/lib/browserInfo";
 
 const PERSISTENT_ID_KEY = "wifi_sharer_persistent_id";
 const TOKEN_KEY = "wifi_sharer_token";
@@ -76,6 +77,18 @@ export function useSession() {
   }));
   const [retentionDays, setRetentionDays] = useState(DEFAULT_RETENTION_DAYS);
   const myUserId = myPersistentId;
+  const browserNameRef = useRef<string>(detectBrowserName());
+
+  // The server can't tell Brave apart from Chrome from the User-Agent alone
+  useEffect(() => {
+    let cancelled = false;
+    detectBrowserNameAsync().then((name) => {
+      if (!cancelled) browserNameRef.current = name;
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const registerUser = useCallback(
     (
@@ -90,9 +103,10 @@ export function useSession() {
     ) => {
       const persistentId = myPersistentId || getOrCreatePersistentId();
       const token = typeof window !== "undefined" ? localStorage.getItem(TOKEN_KEY) : null;
+      const browser = browserNameRef.current || detectBrowserName();
       socketInstance.emit(
         "register_user",
-        { nickname, persistentId, token: token || undefined },
+        { nickname, persistentId, token: token || undefined, browser },
         (res: RegisterUserResponse) => {
           if (res.success) {
             if (res.token) storeToken(res.token);

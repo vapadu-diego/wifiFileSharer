@@ -21,13 +21,60 @@ interface OnlineContactsViewProps {
 
 const getInitials = (name: string) => name.slice(0, 2).toUpperCase();
 
+const deviceIconProps = {
+  width: 14,
+  height: 14,
+  viewBox: "0 0 24 24",
+  fill: "none",
+  stroke: "currentColor",
+  strokeWidth: 1.8,
+  strokeLinecap: "round",
+  strokeLinejoin: "round",
+  "aria-hidden": true,
+  style: { flexShrink: 0 },
+} as const;
+
 function DeviceIcon({ os }: { os: string }) {
-  let icon = "💻";
-  if (os === "iOS" || os === "Android") icon = "📱";
-  else if (os === "macOS") icon = "🍎";
-  else if (os === "Linux") icon = "🐧";
-  else if (os === "Windows") icon = "🪟";
-  return <span style={{ fontSize: "0.75rem", opacity: 0.6 }}>{icon}</span>;
+  if (os === "iOS" || os === "Android") {
+    return (
+      <svg {...deviceIconProps}>
+        <rect x="6" y="2" width="12" height="20" rx="2" />
+        <line x1="10" y1="18" x2="14" y2="18" />
+      </svg>
+    );
+  }
+  if (os === "macOS") {
+    return (
+      <svg {...deviceIconProps}>
+        <rect x="3" y="4" width="18" height="12" rx="2" />
+        <path d="M2 20h20" />
+      </svg>
+    );
+  }
+  if (os === "Linux") {
+    return (
+      <svg {...deviceIconProps}>
+        <polyline points="4 17 10 11 4 5" />
+        <line x1="12" y1="19" x2="20" y2="19" />
+      </svg>
+    );
+  }
+  if (os === "Windows") {
+    return (
+      <svg {...deviceIconProps}>
+        <rect x="3" y="3" width="18" height="18" rx="2" />
+        <line x1="12" y1="3" x2="12" y2="21" />
+        <line x1="3" y1="12" x2="21" y2="12" />
+      </svg>
+    );
+  }
+  return (
+    <svg {...deviceIconProps}>
+      <rect x="2" y="3" width="20" height="14" rx="2" />
+      <line x1="8" y1="21" x2="16" y2="21" />
+      <line x1="12" y1="17" x2="12" y2="21" />
+    </svg>
+  );
 }
 
 export default function OnlineContactsView({
