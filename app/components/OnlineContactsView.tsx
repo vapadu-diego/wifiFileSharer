@@ -12,6 +12,7 @@ interface OnlineContactsViewProps {
   onCreateRoom: () => void;
   onJoinRoom: () => void;
   onOpenSettings?: () => void;
+  onOpenSearch?: () => void;
   isAdmin?: boolean;
   showAdminPanel?: boolean;
   onToggleAdminPanel?: () => void;
@@ -38,6 +39,7 @@ export default function OnlineContactsView({
   onCreateRoom,
   onJoinRoom,
   onOpenSettings,
+  onOpenSearch,
   isAdmin,
   showAdminPanel,
   onToggleAdminPanel,
@@ -52,7 +54,6 @@ export default function OnlineContactsView({
       return a.nickname.localeCompare(b.nickname, "es");
     });
   const onlineCount = filtered.filter((u) => u.isOnline !== false).length;
-  const offlineCount = filtered.length - onlineCount;
 
   return (
     <div
@@ -64,42 +65,30 @@ export default function OnlineContactsView({
       }}
     >
       {/* Header */}
-      <div
-        style={{
-          padding: "1rem 1.25rem",
-          borderBottom: "1px solid var(--card-border)",
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: "8px",
-          background: "var(--background-secondary)",
-        }}
-      >
-        <div className="flex items-center gap-3" style={{ minWidth: 0, flex: 1 }}>
+      <div className="contacts-header">
+        <div className="contacts-profile">
           <div
             className="user-avatar"
-            style={{ width: "36px", height: "36px", fontSize: "0.85rem", flexShrink: 0 }}
+            style={{ width: "40px", height: "40px", fontSize: "0.9rem", flexShrink: 0 }}
           >
             {getInitials(myNickname)}
           </div>
-          <div style={{ minWidth: 0 }}>
-            <div className="truncate" style={{ fontWeight: 600, fontSize: "0.95rem" }}>
+          <div className="contacts-profile-info">
+            <div className="truncate" style={{ fontWeight: 600, fontSize: "0.95rem" }} title={myNickname}>
               {myNickname}
             </div>
-            <div className="text-muted" style={{ fontSize: "0.7rem" }}>
-              {onlineCount} en línea
-              {offlineCount > 0 ? ` · ${offlineCount} desconectado${offlineCount !== 1 ? "s" : ""}` : ""}
+            <div className="text-muted truncate" style={{ fontSize: "0.72rem" }}>
+              {onlineCount === 0 ? "Nadie en línea" : `${onlineCount} en línea`}
             </div>
           </div>
         </div>
 
-        <div className="flex gap-1">
+        <div className="contacts-actions">
           {onOpenSettings && (
             <button
-              className="btn btn-ghost btn-icon"
+              className="btn btn-ghost action-pill"
               onClick={onOpenSettings}
               title="Configuración"
-              style={{ width: "34px", height: "34px", padding: 0 }}
             >
               <svg width="17" height="17" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
                 <circle cx="12" cy="12" r="3" />
@@ -107,36 +96,10 @@ export default function OnlineContactsView({
               </svg>
             </button>
           )}
-          {isAdmin && onToggleAdminPanel && (
-            <button
-              className="btn btn-ghost btn-icon"
-              onClick={onToggleAdminPanel}
-              title="Panel Admin"
-              style={{
-                width: "34px",
-                height: "34px",
-                padding: 0,
-                borderColor: showAdminPanel ? "var(--primary)" : "transparent",
-              }}
-            >
-              🛡️
-            </button>
-          )}
           <button
-            className="btn btn-ghost btn-icon"
-            onClick={onCreateRoom}
-            title="Crear sala"
-            style={{ width: "34px", height: "34px", padding: 0 }}
-          >
-            <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-              <path d="M12 5v14M5 12h14" />
-            </svg>
-          </button>
-          <button
-            className="btn btn-ghost btn-icon"
+            className="btn btn-ghost action-pill"
             onClick={onJoinRoom}
             title="Unirse a sala"
-            style={{ width: "34px", height: "34px", padding: 0 }}
           >
             <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
               <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
@@ -145,6 +108,37 @@ export default function OnlineContactsView({
               <path d="M16 3.13a4 4 0 0 1 0 7.75" />
             </svg>
           </button>
+          <button
+            className="btn btn-ghost action-pill"
+            onClick={onCreateRoom}
+            title="Crear sala"
+          >
+            <svg width="18" height="18" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+              <path d="M12 5v14M5 12h14" />
+            </svg>
+          </button>
+          {onOpenSearch && (
+            <button
+              className="btn btn-ghost action-pill"
+              onClick={onOpenSearch}
+              title="Buscar (Ctrl+K)"
+            >
+              <svg width="17" height="17" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                <circle cx="11" cy="11" r="8" />
+                <path d="M21 21l-4.35-4.35" />
+              </svg>
+            </button>
+          )}
+          {isAdmin && onToggleAdminPanel && (
+            <button
+              className="btn btn-ghost action-pill"
+              onClick={onToggleAdminPanel}
+              title="Panel Admin"
+              style={{ borderColor: showAdminPanel ? "var(--primary)" : undefined }}
+            >
+              🛡️
+            </button>
+          )}
         </div>
       </div>
 
@@ -173,6 +167,7 @@ export default function OnlineContactsView({
                   key={user.persistentId}
                   onClick={() => onStartChat(user)}
                   className="user-card"
+                  title={user.nickname}
                   style={{
                     width: "100%",
                     cursor: "pointer",
@@ -196,26 +191,26 @@ export default function OnlineContactsView({
                     )}
                   </div>
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div className="flex items-center gap-2" style={{ flexWrap: "wrap" }}>
+                    <div className="flex items-center gap-2" style={{ minWidth: 0 }}>
                       <span className="truncate" style={{ fontWeight: 600, fontSize: "0.9rem" }}>
                         {user.nickname}
                       </span>
-                      <span style={{ fontSize: "0.65rem", color: isOnline ? "var(--success)" : "var(--muted)" }}>
+                      <span style={{ fontSize: "0.65rem", color: isOnline ? "var(--success)" : "var(--muted)", flexShrink: 0 }}>
                         ●
                       </span>
                     </div>
-                    <div className="text-muted" style={{ fontSize: "0.7rem", display: "flex", gap: "6px", alignItems: "center" }}>
+                    <div className="text-muted" style={{ fontSize: "0.7rem", display: "flex", gap: "6px", alignItems: "center", minWidth: 0 }}>
                       {isOnline ? (
                         <>
                           <DeviceIcon os={user.os} />
-                          <span>{user.os} · {user.browser}</span>
+                          <span className="truncate" style={{ minWidth: 0 }}>{user.os} · {user.browser}</span>
                         </>
                       ) : (
-                        <span>Desconectado</span>
+                        <span className="truncate" style={{ minWidth: 0 }}>Desconectado</span>
                       )}
                     </div>
                   </div>
-                  <svg width="18" height="18" fill="none" stroke="var(--muted)" strokeWidth="2" viewBox="0 0 24 24" style={{ opacity: 0.4 }}>
+                  <svg width="18" height="18" fill="none" stroke="var(--muted)" strokeWidth="2" viewBox="0 0 24 24" style={{ opacity: 0.4, flexShrink: 0 }}>
                     <path d="M9 18l6-6-6-6" />
                   </svg>
                 </button>

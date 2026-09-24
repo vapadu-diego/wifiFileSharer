@@ -1,8 +1,8 @@
 import { Server, Socket } from "socket.io";
 import fs from "fs";
-import { createRoom, joinRoom, joinRoomAsGhost, leaveRoom, addTextToRoom, getRoom, getAllRooms, kickUser, banUserIp, deleteRoom, removeFileFromRoom, removeTextFromRoom, updateUserSocketId, checkRoomsExist, markRoomTextsRead, serializeRoom, serializeRoomMeta, getRoomTextsPage, renameUserInRooms } from "./rooms";
+import { createRoom, joinRoom, joinRoomAsGhost, leaveRoom, addTextToRoom, getRoom, getAllRooms, kickUser, banUserIp, deleteRoom, removeFileFromRoom, removeTextFromRoom, updateUserSocketId, checkRoomsExist, markRoomTextsRead, serializeRoom, serializeRoomMeta, getRoomTextsPage, renameUserInRooms, searchRoomTexts, getRoomTextContext } from "./rooms";
 import { addUser, scheduleRemoveUser, cancelRemoveUser, getAllUsers, getPersistentId, getSocketId, getUser, renameUser } from "./presence";
-import { addPrivateMessage, getConversationPage, getConversationSince, getMessageContext, getPrivateFiles, getPrivateUpdatesSince, getUnreadCounts, importLocalMessages, editPrivateMessage, deletePrivateMessage, deletePrivateFile, markConversationRead } from "./privateChatRepo";
+import { addPrivateMessage, getConversationPage, getConversationSince, getMessageContext, getPrivateFiles, getPrivateUpdatesSince, getUnreadCounts, importLocalMessages, editPrivateMessage, deletePrivateMessage, deletePrivateFile, markConversationRead, searchPrivateMessages } from "./privateChatRepo";
 import { User, SharedText, RoomSettings, sanitizeReplyRef } from "./types";
 import { registerIdentity, renameIdentity, isReservedNickname, isRegisteredIdentity, getIdentitySettings, setIdentityDiscoverable, PERSISTENT_ID_REGEX } from "./identity";
 import { getDirectory } from "./directory";
@@ -352,6 +352,53 @@ export const setupSocket = (io: Server) => {
         return;
       }
       callback(getRoomTextsPage(roomId, sanitizeCursor(before), typeof limit === "number" ? limit : undefined));
+    });
+
+    // Search across the requester's private conversations (Ctrl+K palette)
+    ackOn("search_private_messages", ({ query, withUserId, limit }, callback) => {
+      const myPersistentId = getPersistentId(socket.id);
+      if (!myPersistentId || typeof query !== "string") {
+        callback({ results: [], hasMore: false });
+        return;
+      }
+      if (!allowEvent("search", 20, 10_000)) {
+        callback({ results: [], hasMore: false, error: "Demasiadas búsquedas seguidas" });
+        return;
+      }
+      const result = searchPrivateMessages(myPersistentId, query, {
+        withUserId: typeof withUserId === "string" ? withUserId : undefined,
+        limit: typeof limit === "number" ? limit : undefined,
+      });
+      callback({
+        ...result,
+        results: result.results.map((item) => ({
+          ...item,
+          partnerOnline: !!getSocketId(item.partnerId),
+        })),
+      });
+    });
+
+    // Search inside the room history (members only)
+    ackOn("search_room_texts", ({ roomId, query }, callback) => {
+      if (typeof roomId !== "string" || !socket.rooms.has(roomId) || typeof query !== "string") {
+        callback({ results: [], hasMore: false });
+        return;
+      }
+      if (!allowEvent("search", 20, 10_000)) {
+        callback({ results: [], hasMore: false, error: "Demasiadas búsquedas seguidas" });
+        return;
+      }
+      callback(searchRoomTexts(roomId, query));
+    });
+
+    // Context page around a room message (jump to a search result)
+    ackOn("get_room_text_context", ({ roomId, messageId, limit }, callback) => {
+      if (typeof roomId !== "string" || !socket.rooms.has(roomId) || typeof messageId !== "string") {
+        callback({ texts: [], hasMoreBefore: false, hasMoreAfter: false });
+        return;
+      }
+      const result = getRoomTextContext(roomId, messageId, typeof limit === "number" ? limit : undefined);
+      callback(result ?? { texts: [], hasMoreBefore: false, hasMoreAfter: false });
     });
 
     // Edit a private message (author only)

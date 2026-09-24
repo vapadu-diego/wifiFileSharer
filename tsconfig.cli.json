@@ -22,6 +22,7 @@
     "app",
     "lib/legacyChat.ts",
     "lib/notifications.ts",
+    "lib/offlineQueue.ts",
     "lib/reply.ts"
   ]
 }

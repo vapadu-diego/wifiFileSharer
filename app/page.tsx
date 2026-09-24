@@ -20,6 +20,7 @@ import AdminPanel from "./components/AdminPanel";
 import Modal from "./components/Modal";
 import ChatLayout from "./components/ChatLayout";
 import SettingsModal from "./components/SettingsModal";
+import CommandPalette from "./components/CommandPalette";
 import { ToastStack } from "./components/ToastStack";
 
 const RECENT_ROOMS_KEY = "wifi_sharer_recent_rooms";
@@ -44,6 +45,8 @@ export default function Home() {
   const [lastIncomingInfo, setLastIncomingInfo] = useState<{ sender: string; body: string } | null>(null);
   const [identityBlocked, setIdentityBlocked] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showPalette, setShowPalette] = useState(false);
+  const [searchTarget, setSearchTarget] = useState<{ partnerId: string; messageId: string } | null>(null);
   const [nicknameError, setNicknameError] = useState("");
   const [nicknameSaving, setNicknameSaving] = useState(false);
   const [settingsError, setSettingsError] = useState("");
@@ -66,7 +69,7 @@ export default function Home() {
   }, []);
 
   const { onlineUsers, setOnlineUsers, chatPartner, setChatPartner, handleStartChat, isAdmin, unreadCounts, setUnreadCounts } = useContacts(socket, chatPartnerRef, handleNewIncomingMessage, pushToast);
-  const { room, setRoom, isGhost, currentView, setCurrentView, showAdminPanel, setShowAdminPanel, handleRoomJoined, handleRoomExited, handleAdminJoinRoom, hasMoreTexts, loadOlderTexts } = useRoom(socket, showModal, handleNewIncomingMessage, pushToast);
+  const { room, setRoom, isGhost, currentView, setCurrentView, showAdminPanel, setShowAdminPanel, handleRoomJoined, handleRoomExited, handleAdminJoinRoom, hasMoreTexts, loadOlderTexts, jumpToText } = useRoom(socket, showModal, handleNewIncomingMessage);
   const { displayRecentRooms, setRecentRooms, checkActiveRecentRooms, handleJoinRecentRoom } = useRecentRooms(socket, showModal);
 
   useEffect(() => {
@@ -141,6 +144,37 @@ export default function Home() {
     setSettingsError("");
     setShowSettings(true);
   }, []);
+
+  // Opening a chat from the sidebar/toast discards any pending search jump
+  const handleStartChatManual = useCallback(
+    (user: OnlineUser) => {
+      setSearchTarget(null);
+      handleStartChat(user);
+    },
+    [handleStartChat]
+  );
+
+  const handleOpenConversation = useCallback(
+    (partner: OnlineUser, messageId?: string) => {
+      handleStartChat(partner);
+      setSearchTarget(messageId ? { partnerId: partner.persistentId, messageId } : null);
+      setCurrentView("contacts");
+    },
+    [handleStartChat, setCurrentView]
+  );
+
+  // Ctrl/Cmd+K opens the command palette
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+        if (showSettings || identityBlocked) return;
+        e.preventDefault();
+        setShowPalette((prev) => !prev);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [showSettings, identityBlocked]);
 
   useEffect(() => {
     if (unreadBrowserCount > 0) {
@@ -288,7 +322,7 @@ export default function Home() {
         <div className="flex flex-col gap-6 items-center w-full max-w-lg animate-slideUp relative" style={{ zIndex: 1 }}>
           <div className="text-center">
             <div className="flex flex-col items-center justify-center gap-3 mb-4">
-              <Image src="/logo.png" alt="Wifi File Sharer" width={80} height={80} unoptimized className="animate-glow rounded-2xl" />
+              <Image src="/icon.png" alt="Wifi File Sharer" width={80} height={80} unoptimized className="animate-glow rounded-2xl" />
               <h1 className="text-gradient" style={{ fontSize: "clamp(1.75rem, 7vw, 3rem)", fontWeight: 700, letterSpacing: "-1px", lineHeight: 1.1 }}>
                 Wifi File Sharer
               </h1>
@@ -357,10 +391,11 @@ export default function Home() {
               myPersistentId={myUserId}
               onlineUsers={onlineUsers}
               unreadCounts={unreadCounts}
-              onStartChat={handleStartChat}
+              onStartChat={handleStartChatManual}
               onCreateRoom={handleOpenCreateRoom}
               onJoinRoom={handleOpenJoinRoom}
               onOpenSettings={handleOpenSettings}
+              onOpenSearch={() => setShowPalette(true)}
               isAdmin={isAdmin}
               showAdminPanel={showAdminPanel}
               onToggleAdminPanel={() => setShowAdminPanel(!showAdminPanel)}
@@ -428,7 +463,15 @@ export default function Home() {
                 currentUserId={myPersistentId || socket.id || ""}
                 currentUserName={myNickname}
                 myUserId={myUserId}
-                onBack={() => setChatPartner(null)}
+                initialMessageId={
+                  searchTarget && chatPartner.persistentId === searchTarget.partnerId
+                    ? searchTarget.messageId
+                    : null
+                }
+                onBack={() => {
+                  setChatPartner(null);
+                  setSearchTarget(null);
+                }}
                 pushToast={pushToast}
               />
             ) : (
@@ -437,7 +480,7 @@ export default function Home() {
                   <span className="empty-logo-halo" />
                   <span className="empty-logo-halo empty-logo-halo--outer" />
                   <Image
-                    src="/logo.png"
+                    src="/icon.png"
                     alt="Wifi File Sharer"
                     width={112}
                     height={112}
@@ -463,6 +506,7 @@ export default function Home() {
           pushToast={pushToast}
           hasMoreTexts={hasMoreTexts}
           onLoadOlderTexts={loadOlderTexts}
+          onJumpToText={jumpToText}
         />
       )}
 
@@ -501,10 +545,30 @@ export default function Home() {
         onUserClick={(user) => {
           // Toasts may carry a stale/fake socket id: resolve the real one (B2)
           const real = onlineUsers.find((u) => u.persistentId === user.persistentId);
-          handleStartChat(real ?? { ...user, isOnline: false });
+          handleStartChatManual(real ?? { ...user, isOnline: false });
           setCurrentView("contacts");
         }}
       />
+
+      {showPalette && (
+      <CommandPalette
+        socket={socket}
+        onClose={() => setShowPalette(false)}
+        contacts={onlineUsers}
+        myPersistentId={myUserId}
+        recentRooms={displayRecentRooms}
+        onOpenConversation={handleOpenConversation}
+        onJoinRecentRoom={(recentRoom) =>
+          handleJoinRecentRoom(recentRoom, (joinedRoom) => {
+            setRoom(joinedRoom);
+            setCurrentView("room");
+          })
+        }
+        onOpenSettings={handleOpenSettings}
+        onCreateRoom={handleOpenCreateRoom}
+        onJoinRoom={handleOpenJoinRoom}
+      />
+      )}
 
       {showSettings && (
         <SettingsModal

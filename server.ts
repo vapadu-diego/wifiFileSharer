@@ -25,8 +25,8 @@ import { initDb, closeDb } from "./lib/db";
 import { getDataDir, getUploadDir, ensureDataDir } from "./lib/paths";
 import { checkNodeVersion, getPurgeIntervalMs } from "./lib/config";
 import { resolveTlsMaterial } from "./lib/tls";
-import { SharedFile, PrivateFile } from "./lib/types";
-import { MAX_CONVERSATION_FILES, MAX_ROOM_FILES } from "./lib/limits";
+import { SharedFile, PrivateFile, getPreviewLanguage } from "./lib/types";
+import { MAX_CONVERSATION_FILES, MAX_PREVIEW_BYTES, MAX_ROOM_FILES } from "./lib/limits";
 
 declare global {
   var io: Server | undefined;
@@ -60,6 +60,41 @@ function findRoomMember(roomId: string, persistentId: string) {
   const member = room.users.find((u) => u.persistentId === persistentId);
   if (!member) return undefined;
   return { room, member };
+}
+
+type PreviewResult =
+  | { ok: true; name: string; size: number; language: string; content: string; truncated: boolean }
+  | { ok: false; reason: "binary" | "too-large" | "not-previewable" | "missing" };
+
+/**
+ * Reads a text/code file for in-chat preview. Rejects binaries (NUL byte) and
+ * files larger than MAX_PREVIEW_BYTES; HTML/XML are returned as data, never
+ * served inline, so they cannot execute.
+ */
+function buildFilePreview(filePath: string, name: string, type: string): PreviewResult {
+  const language = getPreviewLanguage(name, type);
+  if (!language) return { ok: false, reason: "not-previewable" };
+
+  let fd: number;
+  try {
+    fd = fs.openSync(filePath, "r");
+  } catch {
+    return { ok: false, reason: "missing" };
+  }
+
+  try {
+    const size = fs.fstatSync(fd).size;
+    if (size > MAX_PREVIEW_BYTES) return { ok: false, reason: "too-large" };
+
+    const buffer = Buffer.alloc(size);
+    fs.readSync(fd, buffer, 0, size, 0);
+    if (buffer.subarray(0, Math.min(size, 8192)).includes(0)) {
+      return { ok: false, reason: "binary" };
+    }
+    return { ok: true, name, size, language, content: buffer.toString("utf-8"), truncated: false };
+  } finally {
+    fs.closeSync(fd);
+  }
 }
 
 export interface StartServerOptions {
@@ -219,7 +254,8 @@ export async function startServer(options: StartServerOptions) {
         name: uploadedFile.originalFilename || "unknown",
         size: uploadedFile.size,
         type: uploadedFile.mimetype || "application/octet-stream",
-        senderId: identity,
+        // Socket id, like `send_text`, so the uploader is recognized on the client
+        senderId: getSocketId(identity) || identity,
         senderName: member.nickname,
         path: uploadedFile.filepath,
         createdAt: Date.now(),
@@ -339,6 +375,36 @@ export async function startServer(options: StartServerOptions) {
     res.setHeader("Content-Type", file.type);
     res.setHeader("Cache-Control", "private, max-age=3600");
     fs.createReadStream(file.path).pipe(res);
+  });
+
+  // Private code/text preview (data only, rendered escaped by the client)
+  server.get("/api/file-content-private/:fileId", (req: AuthedRequest, res: Response) => {
+    const identity = req.persistentId!;
+    const { fileId } = req.params;
+    const file = getPrivateFileById(fileId);
+    if (!file || (file.fromId !== identity && file.toId !== identity)) {
+      res.status(404).json({ ok: false, reason: "missing" });
+      return;
+    }
+    res.json(buildFilePreview(file.path, file.name, file.type));
+  });
+
+  // Room code/text preview
+  server.get("/api/file-content/:fileId", (req: AuthedRequest, res: Response) => {
+    const identity = req.persistentId!;
+    const { fileId } = req.params;
+    const { roomId } = req.query;
+    const membership = typeof roomId === "string" ? findRoomMember(roomId, identity) : undefined;
+    if (!membership) {
+      res.status(404).json({ ok: false, reason: "missing" });
+      return;
+    }
+    const file = membership.room.files.find((f) => f.id === fileId);
+    if (!file) {
+      res.status(404).json({ ok: false, reason: "missing" });
+      return;
+    }
+    res.json(buildFilePreview(file.path, file.name, file.type));
   });
 
   // Download Endpoint

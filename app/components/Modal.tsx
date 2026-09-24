@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, ReactNode } from "react";
+import { useEffect, ReactNode } from "react";
 
 interface ModalProps {
   isOpen: boolean;
@@ -25,17 +25,6 @@ export default function Modal({
   onConfirm,
   customActions,
 }: ModalProps) {
-  const [visible, setVisible] = useState(false);
-
-  useEffect(() => {
-    if (isOpen) {
-      setVisible(true);
-    } else {
-      const timer = setTimeout(() => setVisible(false), 200);
-      return () => clearTimeout(timer);
-    }
-  }, [isOpen]);
-
   useEffect(() => {
     if (!isOpen) return;
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -47,7 +36,7 @@ export default function Modal({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [isOpen, onClose]);
 
-  if (!visible) return null;
+  if (!isOpen) return null;
 
   const iconColors = {
     info: "var(--primary)",
@@ -83,7 +72,7 @@ export default function Modal({
 
   return (
     <div
-      className="modal-overlay"
+      className="modal-overlay animate-fadeIn"
       style={{
         position: "fixed",
         inset: 0,
@@ -93,20 +82,16 @@ export default function Modal({
         alignItems: "center",
         justifyContent: "center",
         zIndex: 100,
-        opacity: isOpen ? 1 : 0,
-        transition: "opacity 0.2s ease",
         padding: "1rem",
       }}
       onClick={onClose}
     >
       <div
-        className="card"
+        className="card animate-slideUp"
         style={{
           maxWidth: "400px",
           width: "100%",
           textAlign: "center",
-          transform: isOpen ? "scale(1)" : "scale(0.95)",
-          transition: "transform 0.2s ease",
         }}
         onClick={(e) => e.stopPropagation()}
       >

@@ -3,9 +3,10 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.removeTextFromRoom = exports.removeFileFromRoom = exports.getRoomTextsPage = exports.markRoomTextsRead = exports.addTextToRoom = exports.addFileToRoom = exports.renameUserInRooms = exports.deleteRoom = exports.banUserIp = exports.kickUser = exports.checkRoomsExist = exports.leaveRoom = exports.updateUserSocketId = exports.transferHost = exports.joinRoomAsGhost = exports.joinRoom = exports.getAllRooms = exports.serializeRoomMeta = exports.serializeRoom = exports.getRoom = exports.createRoom = void 0;
+exports.removeTextFromRoom = exports.removeFileFromRoom = exports.getRoomTextContext = exports.searchRoomTexts = exports.getRoomTextsPage = exports.markRoomTextsRead = exports.addTextToRoom = exports.addFileToRoom = exports.renameUserInRooms = exports.deleteRoom = exports.banUserIp = exports.kickUser = exports.checkRoomsExist = exports.leaveRoom = exports.updateUserSocketId = exports.transferHost = exports.joinRoomAsGhost = exports.joinRoom = exports.getAllRooms = exports.serializeRoomMeta = exports.serializeRoom = exports.getRoom = exports.createRoom = void 0;
 const types_1 = require("./types");
 const config_1 = require("./config");
+const search_1 = require("./search");
 const limits_1 = require("./limits");
 const fs_1 = __importDefault(require("fs"));
 // In-memory store
@@ -337,6 +338,54 @@ const getRoomTextsPage = (roomId, before, limit) => {
     return { texts, hasMore: start > 0 };
 };
 exports.getRoomTextsPage = getRoomTextsPage;
+/**
+ * Case-insensitive search over the in-memory room history (rooms are
+ * ephemeral, so there is no FTS index for them). Returns the newest matches.
+ */
+const searchRoomTexts = (roomId, query, limit = limits_1.PAGE_SIZE_DEFAULT) => {
+    const room = rooms.get(roomId);
+    const needle = query.trim().toLowerCase();
+    if (!room || needle.length < 2)
+        return { results: [], hasMore: false };
+    const size = Math.max(1, Math.min(Math.floor(limit), limits_1.PAGE_SIZE_MAX));
+    const matches = [];
+    for (let i = room.texts.length - 1; i >= 0 && matches.length <= size; i--) {
+        const text = room.texts[i];
+        if (!text.content.toLowerCase().includes(needle))
+            continue;
+        matches.push({
+            id: text.id,
+            senderId: text.senderId,
+            senderName: text.senderName,
+            snippet: (0, search_1.makeSnippet)(text.content, query.trim()),
+            createdAt: text.createdAt,
+        });
+    }
+    const hasMore = matches.length > size;
+    return { results: matches.slice(0, size), hasMore };
+};
+exports.searchRoomTexts = searchRoomTexts;
+/**
+ * Context page around a room message, used to jump to a search result that is
+ * outside the client's loaded window.
+ */
+const getRoomTextContext = (roomId, messageId, limit = 25) => {
+    const room = rooms.get(roomId);
+    if (!room)
+        return undefined;
+    const index = room.texts.findIndex((t) => t.id === messageId);
+    if (index === -1)
+        return undefined;
+    const size = Math.max(1, Math.min(Math.floor(limit), limits_1.PAGE_SIZE_MAX));
+    const start = Math.max(0, index - size);
+    const end = Math.min(room.texts.length, index + size + 1);
+    return {
+        texts: room.texts.slice(start, end),
+        hasMoreBefore: start > 0,
+        hasMoreAfter: end < room.texts.length,
+    };
+};
+exports.getRoomTextContext = getRoomTextContext;
 const removeFileFromRoom = (roomId, fileId) => {
     const room = rooms.get(roomId);
     if (!room)

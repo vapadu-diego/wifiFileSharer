@@ -1,5 +1,6 @@
 import { Room, User, SharedFile, SharedText, RoomSettings, RoomSummary, DEFAULT_ROOM_SETTINGS } from "./types";
 import { getMaxRoomTexts } from "./config";
+import { makeSnippet } from "./search";
 import { PAGE_SIZE_DEFAULT, PAGE_SIZE_MAX } from "./limits";
 import fs from "fs";
 
@@ -352,6 +353,72 @@ export const getRoomTextsPage = (
   const start = Math.max(0, end - size);
   const texts = sorted.slice(start, end);
   return { texts, hasMore: start > 0 };
+};
+
+export interface RoomTextSearchResult {
+  id: string;
+  senderId: string;
+  senderName: string;
+  snippet: string;
+  createdAt: number;
+}
+
+/**
+ * Case-insensitive search over the in-memory room history (rooms are
+ * ephemeral, so there is no FTS index for them). Returns the newest matches.
+ */
+export const searchRoomTexts = (
+  roomId: string,
+  query: string,
+  limit: number = PAGE_SIZE_DEFAULT
+): { results: RoomTextSearchResult[]; hasMore: boolean } => {
+  const room = rooms.get(roomId);
+  const needle = query.trim().toLowerCase();
+  if (!room || needle.length < 2) return { results: [], hasMore: false };
+
+  const size = Math.max(1, Math.min(Math.floor(limit), PAGE_SIZE_MAX));
+  const matches: RoomTextSearchResult[] = [];
+
+  for (let i = room.texts.length - 1; i >= 0 && matches.length <= size; i--) {
+    const text = room.texts[i];
+    if (!text.content.toLowerCase().includes(needle)) continue;
+    matches.push({
+      id: text.id,
+      senderId: text.senderId,
+      senderName: text.senderName,
+      snippet: makeSnippet(text.content, query.trim()),
+      createdAt: text.createdAt,
+    });
+  }
+
+  const hasMore = matches.length > size;
+  return { results: matches.slice(0, size), hasMore };
+};
+
+/**
+ * Context page around a room message, used to jump to a search result that is
+ * outside the client's loaded window.
+ */
+export const getRoomTextContext = (
+  roomId: string,
+  messageId: string,
+  limit: number = 25
+): { texts: SharedText[]; hasMoreBefore: boolean; hasMoreAfter: boolean } | undefined => {
+  const room = rooms.get(roomId);
+  if (!room) return undefined;
+
+  const index = room.texts.findIndex((t) => t.id === messageId);
+  if (index === -1) return undefined;
+
+  const size = Math.max(1, Math.min(Math.floor(limit), PAGE_SIZE_MAX));
+  const start = Math.max(0, index - size);
+  const end = Math.min(room.texts.length, index + size + 1);
+
+  return {
+    texts: room.texts.slice(start, end),
+    hasMoreBefore: start > 0,
+    hasMoreAfter: end < room.texts.length,
+  };
 };
 
 export const removeFileFromRoom = (roomId: string, fileId: string): boolean => {

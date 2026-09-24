@@ -50,7 +50,8 @@ export function useRecentRooms(
   const checkActiveRecentRooms = useCallback((socketInstance: Socket) => {
     const recent = getRecentRooms();
     if (recent.length === 0) {
-      setActiveRecentRooms([]);
+      // Deferred: this may run from an effect body, and setState must not be synchronous there
+      queueMicrotask(() => setActiveRecentRooms([]));
       return;
     }
     socketInstance.emit(

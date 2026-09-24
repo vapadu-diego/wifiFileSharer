@@ -1,115 +1,13 @@
 "use client";
 
-import React, { useState } from "react";
+import React from "react";
 import dynamic from "next/dynamic";
+import CodeBlock from "./CodeBlock";
 
 const MermaidDiagram = dynamic(() => import("./MermaidDiagram"), {
   ssr: false,
 });
 
-
-// Clipboard fallback for HTTP
-function copyToClipboard(text: string): Promise<void> {
-  if (navigator.clipboard && window.isSecureContext) {
-    return navigator.clipboard.writeText(text);
-  } else {
-    const textArea = document.createElement("textarea");
-    textArea.value = text;
-    textArea.style.position = "fixed";
-    textArea.style.left = "-999999px";
-    textArea.style.top = "-999999px";
-    document.body.appendChild(textArea);
-    textArea.focus({ preventScroll: true });
-    textArea.select();
-    return new Promise((resolve, reject) => {
-      document.execCommand("copy") ? resolve() : reject();
-      textArea.remove();
-    });
-  }
-}
-
-function CopyButton({ text }: { text: string }) {
-  const [copied, setCopied] = useState(false);
-
-  const handleCopy = () => {
-    copyToClipboard(text).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    });
-  };
-
-  return (
-    <button
-      onClick={handleCopy}
-      className="code-copy-btn"
-      title="Copiar"
-    >
-      {copied ? (
-        <svg width="14" height="14" fill="none" stroke="var(--success)" strokeWidth="2" viewBox="0 0 24 24">
-          <polyline points="20 6 9 17 4 12" />
-        </svg>
-      ) : (
-        <svg width="14" height="14" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-          <rect x="9" y="9" width="13" height="13" rx="2" />
-          <path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1" />
-        </svg>
-      )}
-    </button>
-  );
-}
-
-function escapeHtml(text: string): string {
-  return text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;")
-    .replace(/'/g, "&#039;");
-}
-
-function highlightSyntax(code: string): string {
-  const commentPattern = "//.*|/\\*[\\s\\S]*?\\*/";
-  const stringPattern = '"(?:\\\\.|[^"\\\\])*"|\'(?:\\\\.|[^\'\\\\])*\'|\\`(?:\\\\.|[^\\\\`])*\\`';
-  const numberPattern = "\\b\\d+\\b|\\b(?:true|false|null)\\b";
-  const keywordPattern = "\\b(?:const|let|var|function|return|import|export|class|if|else|for|while|try|catch|new|await|async|default|from|switch|case|break|typeof|instanceof|yield|throws|extends|implements)\\b";
-
-  const regex = new RegExp(
-    `(${commentPattern})|(${stringPattern})|(${numberPattern})|(${keywordPattern})`,
-    "g"
-  );
-
-  let result = "";
-  let lastIndex = 0;
-  let match: RegExpExecArray | null;
-
-  while ((match = regex.exec(code)) !== null) {
-    if (match.index > lastIndex) {
-      result += escapeHtml(code.slice(lastIndex, match.index));
-    }
-
-    if (match[1]) {
-      // Comment
-      result += `<span style="color: #8b949e; font-style: italic;">${escapeHtml(match[1])}</span>`;
-    } else if (match[2]) {
-      // String
-      result += `<span style="color: #7ee787;">${escapeHtml(match[2])}</span>`;
-    } else if (match[3]) {
-      // Number/Boolean
-      result += `<span style="color: #ff9b50;">${escapeHtml(match[3])}</span>`;
-    } else if (match[4]) {
-      // Keyword
-      result += `<span style="color: #ff7b72; font-weight: bold;">${escapeHtml(match[4])}</span>`;
-    }
-
-    lastIndex = regex.lastIndex;
-  }
-
-  if (lastIndex < code.length) {
-    result += escapeHtml(code.slice(lastIndex));
-  }
-
-  return result;
-}
 
 const EMOJI_MAP: Record<string, string> = {
   ":bug:": "🐛",
@@ -527,31 +425,6 @@ function isEnvBlock(str: string): boolean {
   const envLineRegex = /^[A-Z_][A-Z0-9_]*=.*/;
   const matchingLines = lines.filter((l) => envLineRegex.test(l.trim()));
   return matchingLines.length >= lines.length * 0.7;
-}
-
-function CodeBlock({ code, language }: { code: string; language?: string }) {
-  const lines = code.split("\n");
-  return (
-    <div className="code-block">
-      <div className="code-block-header">
-        <span className="code-block-lang">{language || "code"}</span>
-        <CopyButton text={code} />
-      </div>
-      <pre className="code-block-content">
-        <code>
-          {lines.map((line, i) => (
-            <span key={i} className="code-line" data-line={i + 1}>
-              <span className="code-ln" aria-hidden="true">{i + 1}</span>
-              <span
-                className="code-line-text"
-                dangerouslySetInnerHTML={{ __html: highlightSyntax(line) || "&nbsp;" }}
-              />
-            </span>
-          ))}
-        </code>
-      </pre>
-    </div>
-  );
 }
 
 interface FormattedMessageProps {

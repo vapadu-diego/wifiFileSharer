@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Socket } from "socket.io-client";
 import { RoomSummary } from "@/lib/types";
 import Modal from "./Modal";
@@ -24,20 +24,20 @@ export default function AdminPanel({ socket, onJoinRoom }: AdminPanelProps) {
   const [loading, setLoading] = useState(true);
   const [closeRoomModal, setCloseRoomModal] = useState<string | null>(null);
 
-  const fetchRooms = () => {
+  const fetchRooms = useCallback(() => {
     socket.emit("get_all_rooms", (res: GetAllRoomsResponse) => {
       setLoading(false);
       if (res.success) {
         setRooms(res.rooms);
       }
     });
-  };
+  }, [socket]);
 
   useEffect(() => {
     fetchRooms();
     const interval = setInterval(fetchRooms, 3000);
     return () => clearInterval(interval);
-  }, [socket]);
+  }, [fetchRooms]);
 
   const formatTime = (timestamp: number) => {
     return new Date(timestamp).toLocaleTimeString("es", { hour: "2-digit", minute: "2-digit" });

@@ -339,6 +339,50 @@ const setupSocket = (io) => {
             }
             callback((0, rooms_1.getRoomTextsPage)(roomId, sanitizeCursor(before), typeof limit === "number" ? limit : undefined));
         });
+        // Search across the requester's private conversations (Ctrl+K palette)
+        ackOn("search_private_messages", ({ query, withUserId, limit }, callback) => {
+            const myPersistentId = (0, presence_1.getPersistentId)(socket.id);
+            if (!myPersistentId || typeof query !== "string") {
+                callback({ results: [], hasMore: false });
+                return;
+            }
+            if (!allowEvent("search", 20, 10000)) {
+                callback({ results: [], hasMore: false, error: "Demasiadas búsquedas seguidas" });
+                return;
+            }
+            const result = (0, privateChatRepo_1.searchPrivateMessages)(myPersistentId, query, {
+                withUserId: typeof withUserId === "string" ? withUserId : undefined,
+                limit: typeof limit === "number" ? limit : undefined,
+            });
+            callback({
+                ...result,
+                results: result.results.map((item) => ({
+                    ...item,
+                    partnerOnline: !!(0, presence_1.getSocketId)(item.partnerId),
+                })),
+            });
+        });
+        // Search inside the room history (members only)
+        ackOn("search_room_texts", ({ roomId, query }, callback) => {
+            if (typeof roomId !== "string" || !socket.rooms.has(roomId) || typeof query !== "string") {
+                callback({ results: [], hasMore: false });
+                return;
+            }
+            if (!allowEvent("search", 20, 10000)) {
+                callback({ results: [], hasMore: false, error: "Demasiadas búsquedas seguidas" });
+                return;
+            }
+            callback((0, rooms_1.searchRoomTexts)(roomId, query));
+        });
+        // Context page around a room message (jump to a search result)
+        ackOn("get_room_text_context", ({ roomId, messageId, limit }, callback) => {
+            if (typeof roomId !== "string" || !socket.rooms.has(roomId) || typeof messageId !== "string") {
+                callback({ texts: [], hasMoreBefore: false, hasMoreAfter: false });
+                return;
+            }
+            const result = (0, rooms_1.getRoomTextContext)(roomId, messageId, typeof limit === "number" ? limit : undefined);
+            callback(result ?? { texts: [], hasMoreBefore: false, hasMoreAfter: false });
+        });
         // Edit a private message (author only)
         ackOn("edit_private_message", ({ id, toId, content }, callback) => {
             const myPersistentId = (0, presence_1.getPersistentId)(socket.id);

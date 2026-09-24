@@ -3,7 +3,9 @@ import path from "path";
 import { getDb, withTransaction } from "./db";
 import { getUploadDir, getLegacyFilesMetaFile } from "./paths";
 import { getRetentionMs } from "./config";
+import { listIdentities } from "./identity";
 import { PrivateFile, PrivateMessage, sanitizeReplyRef } from "./types";
+import { buildSearchTerms, escapeLike, makeSnippet } from "./search";
 import {
   MAX_CONTENT_LENGTH,
   MAX_IMPORT_MESSAGES,
@@ -218,14 +220,15 @@ export const getMessageContext = (
          AND (created_at > ? OR (created_at = ? AND id > ?))
        ORDER BY created_at ASC, id ASC LIMIT ?`
     )
-    .all(key, target.created_at, target.created_at, target.id, size) as unknown as MessageRow[];
+    .all(key, target.created_at, target.created_at, target.id, size + 1) as unknown as MessageRow[];
 
   const hasMoreBefore = beforeRows.length > size;
+  const hasMoreAfter = afterRows.length > size;
   const messages = [
     ...beforeRows.slice(0, size).reverse().map(rowToMessage),
-    ...afterRows.map(rowToMessage),
+    ...afterRows.slice(0, size).map(rowToMessage),
   ];
-  return { messages, hasMoreBefore, hasMoreAfter: afterRows.length === size };
+  return { messages, hasMoreBefore, hasMoreAfter };
 };
 
 export const getPrivateUpdatesSince = (
@@ -271,11 +274,20 @@ export const markConversationRead = (
        WHERE conversation_key = ? AND to_id = ? AND read_at IS NULL AND deleted_at IS NULL`
     )
     .all(key, readerId) as unknown as { id: string }[];
-  if (rows.length === 0) return [];
+  const fileRows = db
+    .prepare(
+      `SELECT id FROM private_files
+       WHERE conversation_key = ? AND to_id = ? AND read_at IS NULL`
+    )
+    .all(key, readerId) as unknown as { id: string }[];
 
-  const update = db.prepare(`UPDATE private_messages SET read_at = ? WHERE id = ?`);
+  if (rows.length === 0 && fileRows.length === 0) return [];
+
+  const updateMessage = db.prepare(`UPDATE private_messages SET read_at = ? WHERE id = ?`);
+  const updateFile = db.prepare(`UPDATE private_files SET read_at = ? WHERE id = ?`);
   withTransaction(() => {
-    for (const row of rows) update.run(readAt, row.id);
+    for (const row of rows) updateMessage.run(readAt, row.id);
+    for (const row of fileRows) updateFile.run(readAt, row.id);
   });
   return rows.map((r) => r.id);
 };
@@ -329,17 +341,101 @@ export const pruneDeletedMessages = (): number => {
 export const getUnreadCounts = (userId: string): Record<string, number> => {
   const rows = getDb()
     .prepare(
-      `SELECT from_id, COUNT(*) AS n FROM private_messages
-       WHERE to_id = ? AND read_at IS NULL AND deleted_at IS NULL
+      `SELECT from_id, COUNT(*) AS n FROM (
+         SELECT from_id FROM private_messages
+          WHERE to_id = ? AND read_at IS NULL AND deleted_at IS NULL
+         UNION ALL
+         SELECT from_id FROM private_files
+          WHERE to_id = ? AND read_at IS NULL
+       )
        GROUP BY from_id`
     )
-    .all(userId) as unknown as { from_id: string; n: number }[];
+    .all(userId, userId) as unknown as { from_id: string; n: number }[];
   const counts: Record<string, number> = {};
   for (const row of rows) {
     const n = Number(row.n);
     if (n > 0) counts[row.from_id] = n;
   }
   return counts;
+};
+
+export interface PrivateSearchResult {
+  message: PrivateMessage;
+  partnerId: string;
+  partnerName: string;
+  snippet: string;
+}
+
+export const SEARCH_PAGE_SIZE = 30;
+
+/**
+ * Full-text search across the requester's conversations. Only messages where
+ * the requester is a participant are returned. The trigram tokenizer matches
+ * substrings (e.g. "Directory" finds `getDirectory`); terms shorter than 3
+ * chars are filtered with LIKE since trigram cannot index them.
+ */
+export const searchPrivateMessages = (
+  meId: string,
+  query: string,
+  options: { withUserId?: string; limit?: number } = {}
+): { results: PrivateSearchResult[]; hasMore: boolean } => {
+  const trimmed = query.trim();
+  if (trimmed.length < 2) return { results: [], hasMore: false };
+
+  const limit = Math.max(1, Math.min(Math.floor(options.limit ?? SEARCH_PAGE_SIZE), 50));
+  const { fts, short } = buildSearchTerms(trimmed);
+  const db = getDb();
+
+  const filters: string[] = ["m.deleted_at IS NULL", "(m.from_id = ? OR m.to_id = ?)"];
+  const params: string[] = [meId, meId];
+
+  if (options.withUserId) {
+    filters.push("m.conversation_key = ?");
+    params.push(conversationKey(meId, options.withUserId));
+  }
+  for (const term of short) {
+    filters.push("m.content LIKE ? ESCAPE '\\'");
+    params.push(`%${escapeLike(term)}%`);
+  }
+
+  let rows: (MessageRow & { snip?: string })[];
+  if (fts) {
+    rows = db
+      .prepare(
+        `SELECT m.*, snippet(private_messages_fts, 0, '[[', ']]', '…', 12) AS snip
+         FROM private_messages_fts
+         JOIN private_messages m ON m.rowid = private_messages_fts.rowid
+         WHERE private_messages_fts MATCH ? AND ${filters.join(" AND ")}
+         ORDER BY private_messages_fts.rank, m.created_at DESC, m.id DESC
+         LIMIT ?`
+      )
+      .all(fts, ...params, limit + 1) as unknown as (MessageRow & { snip?: string })[];
+  } else {
+    rows = db
+      .prepare(
+        `SELECT m.* FROM private_messages m
+         WHERE ${filters.join(" AND ")}
+         ORDER BY m.created_at DESC, m.id DESC
+         LIMIT ?`
+      )
+      .all(...params, limit + 1) as unknown as (MessageRow & { snip?: string })[];
+  }
+
+  const hasMore = rows.length > limit;
+  const nicknames = new Map(listIdentities().map((identity) => [identity.persistentId, identity.nickname]));
+
+  const results = rows.slice(0, limit).map((row) => {
+    const message = rowToMessage(row);
+    const partnerId = message.fromId === meId ? message.toId : message.fromId;
+    return {
+      message,
+      partnerId,
+      partnerName: nicknames.get(partnerId) || message.fromName,
+      snippet: row.snip ?? makeSnippet(message.content, trimmed),
+    };
+  });
+
+  return { results, hasMore };
 };
 
 /**
@@ -549,8 +645,8 @@ export const migrateLegacyPrivateFiles = (): void => {
       const retention = getRetentionMs();
       const insert = db.prepare(
         `INSERT OR IGNORE INTO private_files
-          (id, conversation_key, from_id, to_id, from_name, name, size, type, path, created_at, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          (id, conversation_key, from_id, to_id, from_name, name, size, type, path, created_at, expires_at, read_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       );
       withTransaction(() => {
         for (const file of stored as Partial<PrivateFile>[]) {
@@ -568,7 +664,8 @@ export const migrateLegacyPrivateFiles = (): void => {
             file.type || "application/octet-stream",
             file.path,
             createdAt,
-            retention > 0 ? createdAt + retention : null
+            retention > 0 ? createdAt + retention : null,
+            createdAt
           );
         }
       });

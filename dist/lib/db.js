@@ -44,11 +44,36 @@ CREATE TABLE IF NOT EXISTS private_files (
   type TEXT NOT NULL,
   path TEXT NOT NULL,
   created_at INTEGER NOT NULL,
-  expires_at INTEGER
+  expires_at INTEGER,
+  read_at INTEGER
 );
 CREATE INDEX IF NOT EXISTS idx_pf_conv_created ON private_files (conversation_key, created_at);
 CREATE INDEX IF NOT EXISTS idx_pf_expires ON private_files (expires_at);
+
+-- Full-text search index (trigram: matches substrings inside identifiers)
+CREATE VIRTUAL TABLE IF NOT EXISTS private_messages_fts USING fts5(
+  content,
+  content='private_messages',
+  content_rowid='rowid',
+  tokenize='trigram'
+);
+
+CREATE TRIGGER IF NOT EXISTS private_messages_fts_ai AFTER INSERT ON private_messages BEGIN
+  INSERT INTO private_messages_fts(rowid, content) VALUES (new.rowid, new.content);
+END;
+
+CREATE TRIGGER IF NOT EXISTS private_messages_fts_ad AFTER DELETE ON private_messages BEGIN
+  INSERT INTO private_messages_fts(private_messages_fts, rowid, content)
+    VALUES ('delete', old.rowid, old.content);
+END;
+
+CREATE TRIGGER IF NOT EXISTS private_messages_fts_au AFTER UPDATE ON private_messages BEGIN
+  INSERT INTO private_messages_fts(private_messages_fts, rowid, content)
+    VALUES ('delete', old.rowid, old.content);
+  INSERT INTO private_messages_fts(rowid, content) VALUES (new.rowid, new.content);
+END;
 `;
+const SCHEMA_VERSION = 4;
 function initDb() {
     if (db)
         return db;
@@ -57,18 +82,32 @@ function initDb() {
     db.exec("PRAGMA journal_mode = WAL");
     db.exec("PRAGMA synchronous = NORMAL");
     db.exec("PRAGMA busy_timeout = 5000");
+    const previousVersion = getUserVersion(db);
     db.exec(SCHEMA);
-    migrateSchema(db);
-    db.exec("PRAGMA user_version = 2");
+    migrateSchema(db, previousVersion);
+    db.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     return db;
+}
+function getUserVersion(database) {
+    const row = database.prepare(`PRAGMA user_version`).get();
+    return Number(row?.user_version ?? 0);
 }
 function hasColumn(database, table, column) {
     const rows = database.prepare(`PRAGMA table_info(${table})`).all();
     return rows.some((row) => row.name === column);
 }
-function migrateSchema(database) {
+function migrateSchema(database, previousVersion) {
     if (!hasColumn(database, "users", "discoverable")) {
         database.exec(`ALTER TABLE users ADD COLUMN discoverable INTEGER NOT NULL DEFAULT 1`);
+    }
+    if (!hasColumn(database, "private_files", "read_at")) {
+        database.exec(`ALTER TABLE private_files ADD COLUMN read_at INTEGER`);
+        // Files created before read tracking existed are already old news.
+        database.exec(`UPDATE private_files SET read_at = created_at`);
+    }
+    // The FTS index is created empty: rebuild it from existing messages once.
+    if (previousVersion < 3) {
+        database.exec(`INSERT INTO private_messages_fts(private_messages_fts) VALUES('rebuild')`);
     }
 }
 function getDb() {

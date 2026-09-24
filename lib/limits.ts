@@ -8,3 +8,4 @@ export const PAGE_SIZE_MAX = 100;
 export const RATE_LIMIT_WINDOW_MS = 10_000;
 export const RATE_LIMIT_MAX_EVENTS = 30;
 export const TOMBSTONE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+export const MAX_PREVIEW_BYTES = 512 * 1024;

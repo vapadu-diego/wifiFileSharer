@@ -22,8 +22,7 @@ const ROOM_PAGE_SIZE = 50;
 export function useRoom(
   socket: Socket | null,
   showModal: (title: string, message: string, type: "info" | "warning" | "error") => void,
-  onNewMessage?: (info?: { sender?: string; body?: string }) => void,
-  onToast?: (toast: { icon: string; title: string; body: string }) => void
+  onNewMessage?: (info?: { sender?: string; body?: string }) => void
 ) {
   const [room, setRoom] = useState<Room | null>(null);
   const [isGhost, setIsGhost] = useState(false);
@@ -127,20 +126,14 @@ export function useRoom(
       localStorage.removeItem("wifi_sharer_room_password");
     };
 
-    // Notifications for room messages
+    // Notifications for room messages (in-room toasts live in RoomView so they
+    // can react to the active tab)
     const handleNewTextNotification = (text: SharedText) => {
       if (text.senderId !== socket.id) {
         showBrowserNotification(
           `💬 ${text.senderName} (Sala)`,
           text.content.length > 100 ? text.content.slice(0, 100) + "…" : text.content
         );
-        if (currentView !== "room") {
-          onToast?.({
-            icon: "💬",
-            title: `${text.senderName} (Sala)`,
-            body: text.content.length > 100 ? text.content.slice(0, 100) + "…" : text.content,
-          });
-        }
         onNewMessage?.({ sender: `${text.senderName} (Sala)`, body: text.content });
       }
     };
@@ -152,13 +145,6 @@ export function useRoom(
           `📎 ${file.senderName} (Sala)`,
           `Subió un archivo: ${file.name}`
         );
-        if (currentView !== "room") {
-          onToast?.({
-            icon: "📎",
-            title: `${file.senderName} (Sala)`,
-            body: `Subió un archivo: ${file.name}`,
-          });
-        }
         onNewMessage?.({ sender: `${file.senderName} (Sala)`, body: `📎 ${file.name}` });
       }
     };
@@ -188,7 +174,7 @@ export function useRoom(
       socket.off("identity_replaced", handleIdentityReplaced);
       socket.off("file_uploaded", handleFileUploaded);
     };
-  }, [socket, showModal, currentView, onNewMessage, onToast]);
+  }, [socket, showModal, onNewMessage]);
 
   useEffect(() => {
     if (!socket) return;
@@ -258,6 +244,44 @@ export function useRoom(
     });
   }, [socket, room, hasMoreTexts]);
 
+  /**
+   * Loads the context page around a room message and merges it into the
+   * loaded window (used to jump to a search result outside the snapshot).
+   */
+  const jumpToText = useCallback(
+    (messageId: string): Promise<boolean> => {
+      if (!socket || !room) return Promise.resolve(false);
+      return new Promise((resolve) => {
+        socket.emit(
+          "get_room_text_context",
+          { roomId: room.id, messageId, limit: 25 },
+          (res: RoomTextsPageResponse) => {
+            const texts = res?.texts || [];
+            if (texts.length === 0) {
+              resolve(false);
+              return;
+            }
+            setRoom((prev) => {
+              if (!prev) return prev;
+              const byId = new Map(prev.texts.map((t) => [t.id, t]));
+              for (const text of texts) {
+                if (!byId.has(text.id)) byId.set(text.id, text);
+              }
+              return {
+                ...prev,
+                texts: Array.from(byId.values()).sort(
+                  (a, b) => a.createdAt - b.createdAt || a.id.localeCompare(b.id)
+                ),
+              };
+            });
+            resolve(true);
+          }
+        );
+      });
+    },
+    [socket, room]
+  );
+
   const handleRoomJoined = useCallback((roomId: string, password?: string) => {
     addRecentToStorage(roomId, password);
     setShowAdminPanel(false);
@@ -320,6 +344,7 @@ export function useRoom(
     handleAdminJoinRoom,
     hasMoreTexts,
     loadOlderTexts,
+    jumpToText,
   };
 }
 

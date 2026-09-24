@@ -56,6 +56,7 @@ const db_1 = require("./lib/db");
 const paths_1 = require("./lib/paths");
 const config_1 = require("./lib/config");
 const tls_1 = require("./lib/tls");
+const types_1 = require("./lib/types");
 const limits_1 = require("./lib/limits");
 function getRequestIdentity(req) {
     const headerToken = req.headers["x-auth-token"];
@@ -82,6 +83,37 @@ function findRoomMember(roomId, persistentId) {
     if (!member)
         return undefined;
     return { room, member };
+}
+/**
+ * Reads a text/code file for in-chat preview. Rejects binaries (NUL byte) and
+ * files larger than MAX_PREVIEW_BYTES; HTML/XML are returned as data, never
+ * served inline, so they cannot execute.
+ */
+function buildFilePreview(filePath, name, type) {
+    const language = (0, types_1.getPreviewLanguage)(name, type);
+    if (!language)
+        return { ok: false, reason: "not-previewable" };
+    let fd;
+    try {
+        fd = fs_1.default.openSync(filePath, "r");
+    }
+    catch {
+        return { ok: false, reason: "missing" };
+    }
+    try {
+        const size = fs_1.default.fstatSync(fd).size;
+        if (size > limits_1.MAX_PREVIEW_BYTES)
+            return { ok: false, reason: "too-large" };
+        const buffer = Buffer.alloc(size);
+        fs_1.default.readSync(fd, buffer, 0, size, 0);
+        if (buffer.subarray(0, Math.min(size, 8192)).includes(0)) {
+            return { ok: false, reason: "binary" };
+        }
+        return { ok: true, name, size, language, content: buffer.toString("utf-8"), truncated: false };
+    }
+    finally {
+        fs_1.default.closeSync(fd);
+    }
 }
 async function startServer(options) {
     (0, config_1.checkNodeVersion)();
@@ -214,7 +246,8 @@ async function startServer(options) {
                 name: uploadedFile.originalFilename || "unknown",
                 size: uploadedFile.size,
                 type: uploadedFile.mimetype || "application/octet-stream",
-                senderId: identity,
+                // Socket id, like `send_text`, so the uploader is recognized on the client
+                senderId: (0, presence_1.getSocketId)(identity) || identity,
                 senderName: member.nickname,
                 path: uploadedFile.filepath,
                 createdAt: Date.now(),
@@ -319,6 +352,34 @@ async function startServer(options) {
         res.setHeader("Content-Type", file.type);
         res.setHeader("Cache-Control", "private, max-age=3600");
         fs_1.default.createReadStream(file.path).pipe(res);
+    });
+    // Private code/text preview (data only, rendered escaped by the client)
+    server.get("/api/file-content-private/:fileId", (req, res) => {
+        const identity = req.persistentId;
+        const { fileId } = req.params;
+        const file = (0, privateChatRepo_1.getPrivateFileById)(fileId);
+        if (!file || (file.fromId !== identity && file.toId !== identity)) {
+            res.status(404).json({ ok: false, reason: "missing" });
+            return;
+        }
+        res.json(buildFilePreview(file.path, file.name, file.type));
+    });
+    // Room code/text preview
+    server.get("/api/file-content/:fileId", (req, res) => {
+        const identity = req.persistentId;
+        const { fileId } = req.params;
+        const { roomId } = req.query;
+        const membership = typeof roomId === "string" ? findRoomMember(roomId, identity) : undefined;
+        if (!membership) {
+            res.status(404).json({ ok: false, reason: "missing" });
+            return;
+        }
+        const file = membership.room.files.find((f) => f.id === fileId);
+        if (!file) {
+            res.status(404).json({ ok: false, reason: "missing" });
+            return;
+        }
+        res.json(buildFilePreview(file.path, file.name, file.type));
     });
     // Download Endpoint
     server.get("/api/download/:fileId", (req, res) => {

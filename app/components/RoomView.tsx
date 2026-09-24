@@ -2,11 +2,12 @@
 
 import { useState, useEffect, useLayoutEffect, useCallback, useRef } from "react";
 import { Socket } from "socket.io-client";
-import { Room, ReplyRef, SharedText } from "@/lib/types";
+import { Room, ReplyRef, SharedFile, SharedText, isPreviewableFile } from "@/lib/types";
 import FileTab from "./FileTab";
 import TextTab from "./TextTab";
 import ParticipantsPanel from "./ParticipantsPanel";
 import FileIcon from "./FileIcon";
+import FilePreviewModal from "./FilePreviewModal";
 import Modal from "./Modal";
 import FormattedMessage from "./FormattedMessage";
 import { ReplyQuote } from "./ReplyQuote";
@@ -29,6 +30,21 @@ interface RoomViewProps {
   pushToast?: (toast: Omit<ToastItem, "id">, durationMs?: number) => void;
   hasMoreTexts?: boolean;
   onLoadOlderTexts?: () => Promise<void>;
+  onJumpToText?: (messageId: string) => Promise<boolean>;
+}
+
+interface RoomSearchResult {
+  id: string;
+  senderId: string;
+  senderName: string;
+  snippet: string;
+  createdAt: number;
+}
+
+interface RoomSearchResponse {
+  results: RoomSearchResult[];
+  hasMore: boolean;
+  error?: string;
 }
 
 // Clipboard fallback for HTTP
@@ -46,7 +62,8 @@ function copyToClipboard(text: string): Promise<void> {
     textArea.focus({ preventScroll: true });
     textArea.select();
     return new Promise((resolve, reject) => {
-      document.execCommand("copy") ? resolve() : reject();
+      if (document.execCommand("copy")) resolve();
+      else reject();
       textArea.remove();
     });
   }
@@ -54,6 +71,23 @@ function copyToClipboard(text: string): Promise<void> {
 
 const formatTime = (ts: number) =>
   new Date(ts).toLocaleTimeString("es", { hour: "2-digit", minute: "2-digit" });
+
+function SearchSnippet({ text }: { text: string }) {
+  const parts = text.split(/\[\[|\]\]/);
+  return (
+    <>
+      {parts.map((part, i) =>
+        i % 2 === 1 ? (
+          <mark key={i} className="palette-mark">
+            {part}
+          </mark>
+        ) : (
+          <span key={i}>{part}</span>
+        )
+      )}
+    </>
+  );
+}
 
 export default function RoomView({
   socket,
@@ -64,9 +98,15 @@ export default function RoomView({
   pushToast,
   hasMoreTexts = false,
   onLoadOlderTexts,
+  onJumpToText,
 }: RoomViewProps) {
   useKeyboardInset();
   const [activeTab, setActiveTab] = useState<"files" | "texts">("texts");
+  const [previewFile, setPreviewFile] = useState<SharedFile | null>(null);
+  const [showSearch, setShowSearch] = useState(false);
+  const [searchQuery, setSearchQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<RoomSearchResult[]>([]);
+  const [searching, setSearching] = useState(false);
   const [replyTo, setReplyTo] = useState<ReplyRef | null>(null);
   const [contextMenu, setContextMenu] = useState<{ x: number; y: number; messageId: string; hasSelection: boolean; selectionReply?: ReplyRef | null } | null>(null);
   const contextMenuRef = useRef<HTMLDivElement>(null);
@@ -85,6 +125,7 @@ export default function RoomView({
   const highlightTimerRef = useRef<number | null>(null);
   const typingTimerRefs = useRef<Record<string, number>>({});
   const lastReadEmitRef = useRef(0);
+  const readTimerRef = useRef<number | null>(null);
   const userScrollingRef = useRef(false);
 
   const visibleMessages = room.texts;
@@ -133,21 +174,47 @@ export default function RoomView({
     container?.scrollTo({ top: container.scrollHeight, behavior: "smooth" });
   };
 
-  // Highlight + count new incoming room messages (live events only)
+  // Highlight + count new incoming room messages (live events only). When the
+  // chat tab is not visible, surface the message with a toast instead.
   useEffect(() => {
-    const handleRoomText = (text: { id: string; senderId: string }) => {
+    const handleRoomText = (text: SharedText) => {
       if (text.senderId === currentUserId) return;
       if (highlightTimerRef.current) window.clearTimeout(highlightTimerRef.current);
       setHighlightId(text.id);
       highlightTimerRef.current = window.setTimeout(() => setHighlightId(null), 1700);
-      if (!isAtBottomRef.current) setUnseenCount((prev) => prev + 1);
+      if (activeTab !== "texts") {
+        pushToast?.({
+          icon: "💬",
+          title: `${text.senderName} (Sala)`,
+          body: text.content.length > 100 ? text.content.slice(0, 100) + "…" : text.content,
+        });
+      } else if (!isAtBottomRef.current) {
+        setUnseenCount((prev) => prev + 1);
+      }
     };
     socket.on("new_text", handleRoomText);
     return () => {
       socket.off("new_text", handleRoomText);
       if (highlightTimerRef.current) window.clearTimeout(highlightTimerRef.current);
     };
-  }, [socket, currentUserId]);
+  }, [socket, currentUserId, activeTab, pushToast]);
+
+  // Toast for room file uploads while the files tab is not visible
+  useEffect(() => {
+    const handleFileUploaded = (file: SharedFile) => {
+      if (file.senderId === currentUserId) return;
+      if (activeTab === "files") return;
+      pushToast?.({
+        icon: "📎",
+        title: `${file.senderName} (Sala)`,
+        body: `Subió un archivo: ${file.name}`,
+      });
+    };
+    socket.on("file_uploaded", handleFileUploaded);
+    return () => {
+      socket.off("file_uploaded", handleFileUploaded);
+    };
+  }, [socket, currentUserId, activeTab, pushToast]);
 
   // Live typing indicator from other room users
   useEffect(() => {
@@ -171,15 +238,32 @@ export default function RoomView({
     };
   }, [socket, currentUserId]);
 
-  // Tell the server we've read the latest room messages while on the chat tab
+  // Tell the server we've read the latest room messages while on the chat tab.
+  // Trailing throttle: a message arriving inside the window still gets marked.
   useEffect(() => {
     if (activeTab !== "texts" || isGhost) return;
     const last = room.texts[room.texts.length - 1];
     if (!last) return;
-    const now = Date.now();
-    if (now - lastReadEmitRef.current < 1000) return;
-    lastReadEmitRef.current = now;
-    socket.emit("room_mark_read", { roomId: room.id, upToMessageId: last.id });
+    const emit = () => {
+      lastReadEmitRef.current = Date.now();
+      socket.emit("room_mark_read", { roomId: room.id, upToMessageId: last.id });
+    };
+    const elapsed = Date.now() - lastReadEmitRef.current;
+    if (elapsed >= 1000) {
+      emit();
+      return;
+    }
+    if (readTimerRef.current !== null) return;
+    readTimerRef.current = window.setTimeout(() => {
+      readTimerRef.current = null;
+      emit();
+    }, 1000 - elapsed);
+    return () => {
+      if (readTimerRef.current !== null) {
+        window.clearTimeout(readTimerRef.current);
+        readTimerRef.current = null;
+      }
+    };
   }, [room.texts, activeTab, room.id, isGhost, socket]);
 
   // Anchor to bottom before first paint when entering the texts tab
@@ -387,6 +471,49 @@ export default function RoomView({
     tryLoad();
   };
 
+  // Debounced search over the room history
+  useEffect(() => {
+    if (!showSearch) return;
+    const trimmed = searchQuery.trim();
+    if (trimmed.length < 2 || !socket.connected) {
+      setSearchResults([]);
+      setSearching(false);
+      return;
+    }
+    setSearching(true);
+    const timer = window.setTimeout(() => {
+      socket.emit(
+        "search_room_texts",
+        { roomId: room.id, query: trimmed },
+        (res: RoomSearchResponse) => {
+          setSearchResults(res?.results || []);
+          setSearching(false);
+        }
+      );
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [searchQuery, showSearch, socket, room.id]);
+
+  const openSearchResult = (result: RoomSearchResult) => {
+    setActiveTab("texts");
+    const focusResult = () => {
+      const el = document.getElementById(`msg-${result.id}`);
+      if (el) {
+        el.scrollIntoView({ behavior: "smooth", block: "center" });
+        flashMessage(result.id);
+      }
+    };
+    if (document.getElementById(`msg-${result.id}`)) {
+      setShowSearch(false);
+      focusResult();
+      return;
+    }
+    onJumpToText?.(result.id).then(() => {
+      setShowSearch(false);
+      window.setTimeout(focusResult, 120);
+    });
+  };
+
   const handleMessageContextMenu = (e: React.MouseEvent, item: SharedText) => {
     e.preventDefault();
     const MENU_WIDTH = 150;
@@ -481,6 +608,27 @@ export default function RoomView({
           <div className="flex items-center gap-2">
             <button
               className="btn btn-ghost btn-sm"
+              onClick={() => {
+                setShowSearch((prev) => !prev);
+                setSearchQuery("");
+                setSearchResults([]);
+              }}
+              title="Buscar en la sala"
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "6px",
+                borderColor: showSearch ? "var(--primary)" : "transparent",
+              }}
+            >
+              <svg width="16" height="16" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                <circle cx="11" cy="11" r="8" />
+                <path d="M21 21l-4.35-4.35" />
+              </svg>
+            </button>
+
+            <button
+              className="btn btn-ghost btn-sm"
               onClick={() => setShowParticipants(!showParticipants)}
               style={{ display: "flex", alignItems: "center", gap: "6px" }}
             >
@@ -500,6 +648,47 @@ export default function RoomView({
             </button>
           </div>
         </header>
+
+        {showSearch && (
+          <div className="room-search-panel animate-fadeIn">
+            <input
+              className="input"
+              placeholder="Buscar en el historial de la sala..."
+              value={searchQuery}
+              onChange={(e) => setSearchQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") setShowSearch(false);
+              }}
+              autoFocus
+              autoComplete="off"
+            />
+            <div className="room-search-results">
+              {searching && <div className="text-muted" style={{ padding: "10px" }}>Buscando...</div>}
+              {!searching && searchQuery.trim().length >= 2 && searchResults.length === 0 && (
+                <div className="text-muted" style={{ padding: "10px" }}>Sin resultados</div>
+              )}
+              {searchResults.map((result) => (
+                <button
+                  key={result.id}
+                  className="palette-item"
+                  onClick={() => openSearchResult(result)}
+                  onMouseEnter={(e) => (e.currentTarget.style.background = "rgba(255,255,255,0.05)")}
+                  onMouseLeave={(e) => (e.currentTarget.style.background = "transparent")}
+                >
+                  <span className="palette-item-body">
+                    <span className="palette-item-title">
+                      {result.senderName}
+                      <span className="palette-item-time">{formatTime(result.createdAt)}</span>
+                    </span>
+                    <span className="palette-item-subtitle palette-snippet">
+                      <SearchSnippet text={result.snippet} />
+                    </span>
+                  </span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
 
         {/* Tabs */}
         <div className="tabs mb-4">
@@ -587,17 +776,34 @@ export default function RoomView({
                       <div className="text-muted" style={{ fontSize: "0.65rem", alignSelf: "flex-end" }}>
                         {formatTime(file.createdAt)}
                       </div>
-                      <a
-                        href={`/api/download/${file.id}?roomId=${room.id}`}
-                        target="_blank"
-                        className="btn btn-secondary btn-sm mt-auto"
-                        style={{ display: "flex", alignItems: "center", gap: "6px", justifyContent: "center" }}
-                      >
-                        <svg width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
-                          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" />
-                        </svg>
-                        <span>Descargar</span>
-                      </a>
+                      <div className="flex gap-2 mt-auto">
+                        {!isImage(file.type) && isPreviewableFile(file.name, file.type) && (
+                          <button
+                            type="button"
+                            className="btn btn-ghost btn-sm"
+                            onClick={() => setPreviewFile(file)}
+                            style={{ display: "flex", alignItems: "center", gap: "6px", justifyContent: "center" }}
+                            title="Ver"
+                          >
+                            <svg width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                              <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z" />
+                              <circle cx="12" cy="12" r="3" />
+                            </svg>
+                            <span>Ver</span>
+                          </button>
+                        )}
+                        <a
+                          href={`/api/download/${file.id}?roomId=${room.id}`}
+                          target="_blank"
+                          className="btn btn-secondary btn-sm"
+                          style={{ display: "flex", alignItems: "center", gap: "6px", justifyContent: "center", flex: 1 }}
+                        >
+                          <svg width="12" height="12" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+                            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" />
+                          </svg>
+                          <span>Descargar</span>
+                        </a>
+                      </div>
                     </div>
                   ))}
                 </div>
@@ -1024,6 +1230,15 @@ export default function RoomView({
             else if (deleteModal.type === "file") handleDeleteFile(deleteModal.id!);
             else if (deleteModal.type === "text") handleDeleteText(deleteModal.id!);
           }}
+        />
+      )}
+
+      {previewFile && (
+        <FilePreviewModal
+          fileName={previewFile.name}
+          url={`/api/file-content/${previewFile.id}?roomId=${room.id}`}
+          downloadUrl={`/api/download/${previewFile.id}?roomId=${room.id}`}
+          onClose={() => setPreviewFile(null)}
         />
       )}
     </div>

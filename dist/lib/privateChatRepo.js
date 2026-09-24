@@ -3,14 +3,16 @@ var __importDefault = (this && this.__importDefault) || function (mod) {
     return (mod && mod.__esModule) ? mod : { "default": mod };
 };
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.migrateLegacyPrivateFiles = exports.removeOrphanUploads = exports.purgeExpiredFiles = exports.removePrivateFileById = exports.deletePrivateFile = exports.getPrivateFileById = exports.getPrivateFiles = exports.addPrivateFile = exports.importLocalMessages = exports.getUnreadCounts = exports.pruneDeletedMessages = exports.deletePrivateMessage = exports.editPrivateMessage = exports.markConversationRead = exports.getPrivateUpdatesSince = exports.getMessageContext = exports.getConversationSince = exports.getConversationPage = exports.addPrivateMessage = void 0;
+exports.migrateLegacyPrivateFiles = exports.removeOrphanUploads = exports.purgeExpiredFiles = exports.removePrivateFileById = exports.deletePrivateFile = exports.getPrivateFileById = exports.getPrivateFiles = exports.addPrivateFile = exports.importLocalMessages = exports.searchPrivateMessages = exports.SEARCH_PAGE_SIZE = exports.getUnreadCounts = exports.pruneDeletedMessages = exports.deletePrivateMessage = exports.editPrivateMessage = exports.markConversationRead = exports.getPrivateUpdatesSince = exports.getMessageContext = exports.getConversationSince = exports.getConversationPage = exports.addPrivateMessage = void 0;
 exports.conversationKey = conversationKey;
 const fs_1 = __importDefault(require("fs"));
 const path_1 = __importDefault(require("path"));
 const db_1 = require("./db");
 const paths_1 = require("./paths");
 const config_1 = require("./config");
+const identity_1 = require("./identity");
 const types_1 = require("./types");
+const search_1 = require("./search");
 const limits_1 = require("./limits");
 function conversationKey(a, b) {
     return [a, b].sort().join(":");
@@ -134,13 +136,14 @@ const getMessageContext = (userId1, userId2, messageId, limit) => {
        WHERE conversation_key = ? AND deleted_at IS NULL
          AND (created_at > ? OR (created_at = ? AND id > ?))
        ORDER BY created_at ASC, id ASC LIMIT ?`)
-        .all(key, target.created_at, target.created_at, target.id, size);
+        .all(key, target.created_at, target.created_at, target.id, size + 1);
     const hasMoreBefore = beforeRows.length > size;
+    const hasMoreAfter = afterRows.length > size;
     const messages = [
         ...beforeRows.slice(0, size).reverse().map(rowToMessage),
-        ...afterRows.map(rowToMessage),
+        ...afterRows.slice(0, size).map(rowToMessage),
     ];
-    return { messages, hasMoreBefore, hasMoreAfter: afterRows.length === size };
+    return { messages, hasMoreBefore, hasMoreAfter };
 };
 exports.getMessageContext = getMessageContext;
 const getPrivateUpdatesSince = (userId1, userId2, since) => {
@@ -169,12 +172,19 @@ const markConversationRead = (readerId, otherId, readAt = Date.now()) => {
         .prepare(`SELECT id FROM private_messages
        WHERE conversation_key = ? AND to_id = ? AND read_at IS NULL AND deleted_at IS NULL`)
         .all(key, readerId);
-    if (rows.length === 0)
+    const fileRows = db
+        .prepare(`SELECT id FROM private_files
+       WHERE conversation_key = ? AND to_id = ? AND read_at IS NULL`)
+        .all(key, readerId);
+    if (rows.length === 0 && fileRows.length === 0)
         return [];
-    const update = db.prepare(`UPDATE private_messages SET read_at = ? WHERE id = ?`);
+    const updateMessage = db.prepare(`UPDATE private_messages SET read_at = ? WHERE id = ?`);
+    const updateFile = db.prepare(`UPDATE private_files SET read_at = ? WHERE id = ?`);
     (0, db_1.withTransaction)(() => {
         for (const row of rows)
-            update.run(readAt, row.id);
+            updateMessage.run(readAt, row.id);
+        for (const row of fileRows)
+            updateFile.run(readAt, row.id);
     });
     return rows.map((r) => r.id);
 };
@@ -213,10 +223,15 @@ const pruneDeletedMessages = () => {
 exports.pruneDeletedMessages = pruneDeletedMessages;
 const getUnreadCounts = (userId) => {
     const rows = (0, db_1.getDb)()
-        .prepare(`SELECT from_id, COUNT(*) AS n FROM private_messages
-       WHERE to_id = ? AND read_at IS NULL AND deleted_at IS NULL
+        .prepare(`SELECT from_id, COUNT(*) AS n FROM (
+         SELECT from_id FROM private_messages
+          WHERE to_id = ? AND read_at IS NULL AND deleted_at IS NULL
+         UNION ALL
+         SELECT from_id FROM private_files
+          WHERE to_id = ? AND read_at IS NULL
+       )
        GROUP BY from_id`)
-        .all(userId);
+        .all(userId, userId);
     const counts = {};
     for (const row of rows) {
         const n = Number(row.n);
@@ -226,6 +241,64 @@ const getUnreadCounts = (userId) => {
     return counts;
 };
 exports.getUnreadCounts = getUnreadCounts;
+exports.SEARCH_PAGE_SIZE = 30;
+/**
+ * Full-text search across the requester's conversations. Only messages where
+ * the requester is a participant are returned. The trigram tokenizer matches
+ * substrings (e.g. "Directory" finds `getDirectory`); terms shorter than 3
+ * chars are filtered with LIKE since trigram cannot index them.
+ */
+const searchPrivateMessages = (meId, query, options = {}) => {
+    const trimmed = query.trim();
+    if (trimmed.length < 2)
+        return { results: [], hasMore: false };
+    const limit = Math.max(1, Math.min(Math.floor(options.limit ?? exports.SEARCH_PAGE_SIZE), 50));
+    const { fts, short } = (0, search_1.buildSearchTerms)(trimmed);
+    const db = (0, db_1.getDb)();
+    const filters = ["m.deleted_at IS NULL", "(m.from_id = ? OR m.to_id = ?)"];
+    const params = [meId, meId];
+    if (options.withUserId) {
+        filters.push("m.conversation_key = ?");
+        params.push(conversationKey(meId, options.withUserId));
+    }
+    for (const term of short) {
+        filters.push("m.content LIKE ? ESCAPE '\\'");
+        params.push(`%${(0, search_1.escapeLike)(term)}%`);
+    }
+    let rows;
+    if (fts) {
+        rows = db
+            .prepare(`SELECT m.*, snippet(private_messages_fts, 0, '[[', ']]', '…', 12) AS snip
+         FROM private_messages_fts
+         JOIN private_messages m ON m.rowid = private_messages_fts.rowid
+         WHERE private_messages_fts MATCH ? AND ${filters.join(" AND ")}
+         ORDER BY private_messages_fts.rank, m.created_at DESC, m.id DESC
+         LIMIT ?`)
+            .all(fts, ...params, limit + 1);
+    }
+    else {
+        rows = db
+            .prepare(`SELECT m.* FROM private_messages m
+         WHERE ${filters.join(" AND ")}
+         ORDER BY m.created_at DESC, m.id DESC
+         LIMIT ?`)
+            .all(...params, limit + 1);
+    }
+    const hasMore = rows.length > limit;
+    const nicknames = new Map((0, identity_1.listIdentities)().map((identity) => [identity.persistentId, identity.nickname]));
+    const results = rows.slice(0, limit).map((row) => {
+        const message = rowToMessage(row);
+        const partnerId = message.fromId === meId ? message.toId : message.fromId;
+        return {
+            message,
+            partnerId,
+            partnerName: nicknames.get(partnerId) || message.fromName,
+            snippet: row.snip ?? (0, search_1.makeSnippet)(message.content, trimmed),
+        };
+    });
+    return { results, hasMore };
+};
+exports.searchPrivateMessages = searchPrivateMessages;
 /**
  * Imports legacy local history. Only messages authored by the requester are
  * accepted, so a participant cannot fabricate the other side's words.
@@ -398,8 +471,8 @@ const migrateLegacyPrivateFiles = () => {
         if (Array.isArray(stored)) {
             const retention = (0, config_1.getRetentionMs)();
             const insert = db.prepare(`INSERT OR IGNORE INTO private_files
-          (id, conversation_key, from_id, to_id, from_name, name, size, type, path, created_at, expires_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
+          (id, conversation_key, from_id, to_id, from_name, name, size, type, path, created_at, expires_at, read_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`);
             (0, db_1.withTransaction)(() => {
                 for (const file of stored) {
                     if (!file || !file.id || !file.fromId || !file.toId || !file.path)
@@ -407,7 +480,7 @@ const migrateLegacyPrivateFiles = () => {
                     if (!fs_1.default.existsSync(file.path))
                         continue;
                     const createdAt = typeof file.createdAt === "number" ? file.createdAt : Date.now();
-                    insert.run(file.id, conversationKey(file.fromId, file.toId), file.fromId, file.toId, file.fromName || "", file.name || "unknown", typeof file.size === "number" ? file.size : 0, file.type || "application/octet-stream", file.path, createdAt, retention > 0 ? createdAt + retention : null);
+                    insert.run(file.id, conversationKey(file.fromId, file.toId), file.fromId, file.toId, file.fromName || "", file.name || "unknown", typeof file.size === "number" ? file.size : 0, file.type || "application/octet-stream", file.path, createdAt, retention > 0 ? createdAt + retention : null, createdAt);
                 }
             });
         }

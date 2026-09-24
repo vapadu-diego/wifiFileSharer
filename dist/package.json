@@ -34,7 +34,7 @@
         "build:next": "next build",
         "build:cli": "tsc -p tsconfig.cli.json",
         "start": "node dist/server.js",
-        "lint": "next lint",
+        "lint": "eslint .",
         "prepublishOnly": "npm run build"
     },
     "dependencies": {
@@ -48,6 +48,7 @@
         "react-dom": "19.2.3",
         "selfsigned": "^5.5.0",
         "server-only": "^0.0.1",
+        "shiki": "^4.4.3",
         "socket.io": "^4.8.3",
         "socket.io-client": "^4.8.3"
     },

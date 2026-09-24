@@ -17,7 +17,12 @@ export function useSocket() {
       timeout: 20000,
     });
 
-    setSocket(socketInstance);
+    // Publish the socket asynchronously so the first render stays stable
+    // (avoids setState synchronously inside the effect)
+    let cancelled = false;
+    queueMicrotask(() => {
+      if (!cancelled) setSocket(socketInstance);
+    });
 
     socketInstance.on("connect", () => {
       reconnectAttemptRef.current = 0;
@@ -36,6 +41,7 @@ export function useSocket() {
     });
 
     return () => {
+      cancelled = true;
       socketInstance.disconnect();
     };
   }, []);

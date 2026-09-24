@@ -124,7 +124,12 @@ export function buildSelectionReply(
           const num = Number((el as HTMLElement).dataset.line);
           return num >= startLine && num <= endLine;
         })
-        .map((el) => el.querySelector(".code-line-text")?.textContent ?? "");
+        .map((el) => {
+          // Plain fallback renders the number in `.code-ln`; Shiki renders it
+          // via CSS `::before`, so `textContent` holds only the code.
+          const textEl = el.querySelector(".code-line-text");
+          return textEl?.textContent ?? el.textContent ?? "";
+        });
 
       return {
         id: message.id,

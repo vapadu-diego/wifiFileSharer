@@ -1,6 +1,6 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
-exports.TOMBSTONE_RETENTION_MS = exports.RATE_LIMIT_MAX_EVENTS = exports.RATE_LIMIT_WINDOW_MS = exports.PAGE_SIZE_MAX = exports.PAGE_SIZE_DEFAULT = exports.MAX_IMPORT_MESSAGES = exports.MAX_CONVERSATION_FILES = exports.MAX_ROOM_FILES = exports.MAX_NICKNAME_LENGTH = exports.MAX_CONTENT_LENGTH = void 0;
+exports.MAX_PREVIEW_BYTES = exports.TOMBSTONE_RETENTION_MS = exports.RATE_LIMIT_MAX_EVENTS = exports.RATE_LIMIT_WINDOW_MS = exports.PAGE_SIZE_MAX = exports.PAGE_SIZE_DEFAULT = exports.MAX_IMPORT_MESSAGES = exports.MAX_CONVERSATION_FILES = exports.MAX_ROOM_FILES = exports.MAX_NICKNAME_LENGTH = exports.MAX_CONTENT_LENGTH = void 0;
 exports.MAX_CONTENT_LENGTH = 20000;
 exports.MAX_NICKNAME_LENGTH = 20;
 exports.MAX_ROOM_FILES = 500;
@@ -11,3 +11,4 @@ exports.PAGE_SIZE_MAX = 100;
 exports.RATE_LIMIT_WINDOW_MS = 10000;
 exports.RATE_LIMIT_MAX_EVENTS = 30;
 exports.TOMBSTONE_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+exports.MAX_PREVIEW_BYTES = 512 * 1024;

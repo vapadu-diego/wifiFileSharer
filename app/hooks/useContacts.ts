@@ -120,8 +120,8 @@ export function useContacts(
 
     const handlePrivateFile = (f: PrivateFile) => {
       // f.fromId is now a persistentId
-      const isCurrentPartner = chatPartnerRef.current?.persistentId !== f.fromId;
-      if (isCurrentPartner) {
+      const isOtherPartner = chatPartnerRef.current?.persistentId !== f.fromId;
+      if (isOtherPartner) {
         setUnreadCounts((prev) => ({
           ...prev,
           [f.fromId]: (prev[f.fromId] || 0) + 1,
@@ -148,6 +148,13 @@ export function useContacts(
       onNewMessage?.({ sender: f.fromName, body: `📎 ${f.name}` });
     };
 
+    // Deleting a message/file changes the server-side unread counters
+    const refreshUnread = () => {
+      socket.emit("get_private_unread_counts", {}, (res: { counts?: Record<string, number> }) => {
+        setUnreadCounts(res?.counts || {});
+      });
+    };
+
     socket.on("admin_status", handleAdminStatus);
     socket.on("user_online", handleUserOnline);
     socket.on("user_offline", handleUserOffline);
@@ -155,6 +162,8 @@ export function useContacts(
     socket.on("user_updated", handleUserUpdated);
     socket.on("private_message", handlePrivateMessage);
     socket.on("private_file", handlePrivateFile);
+    socket.on("private_message_deleted", refreshUnread);
+    socket.on("private_file_deleted", refreshUnread);
 
     return () => {
       socket.off("admin_status", handleAdminStatus);
@@ -164,6 +173,8 @@ export function useContacts(
       socket.off("user_updated", handleUserUpdated);
       socket.off("private_message", handlePrivateMessage);
       socket.off("private_file", handlePrivateFile);
+      socket.off("private_message_deleted", refreshUnread);
+      socket.off("private_file_deleted", refreshUnread);
     };
   }, [socket, chatPartnerRef, onNewMessage, onToast]);
 
